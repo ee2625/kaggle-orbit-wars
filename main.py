@@ -23,6 +23,17 @@ class Planet:
     production: int
 
 
+@dataclass(frozen=True)
+class Fleet:
+    id: int
+    owner: int
+    x: float
+    y: float
+    angle: float
+    from_planet_id: int
+    ships: int
+
+
 def _agent_impl(obs: Any) -> List[List[float]]:
     """Kaggle entrypoint.
 
@@ -30,6 +41,7 @@ def _agent_impl(obs: Any) -> List[List[float]]:
     This baseline aims for robust legal play over cleverness.
     """
     planets = [Planet(*p) for p in get_field(obs, "planets", [])]
+    fleets = [Fleet(*f) for f in get_field(obs, "fleets", [])]
     player = int(get_field(obs, "player", 0))
 
     my_planets = [p for p in planets if p.owner == player]
@@ -39,16 +51,47 @@ def _agent_impl(obs: Any) -> List[List[float]]:
 
     angular_velocity = float(get_field(obs, "angular_velocity", 0.0))
     comet_ids = set(get_field(obs, "comet_planet_ids", []) or [])
+    incoming = build_incoming_map(fleets, planets, obs, angular_velocity, comet_ids)
+    planned_by_target: dict[int, int] = {}
+    defense_needs = build_defense_needs(my_planets, incoming, player)
     moves: List[List[float]] = []
 
     # Strong planets should decide first, before smaller worlds spend themselves.
     for source in sorted(my_planets, key=lambda p: (p.ships, p.production), reverse=True):
-        reserve = reserve_for(source)
+        reserve = reserve_for(source) + threatened_reserve(source, incoming, player)
         available = int(source.ships - reserve)
         if available <= 1:
             continue
 
-        choice = choose_target(source, targets, planets, obs, angular_velocity, comet_ids, available)
+        defense = choose_defense_target(
+            source,
+            my_planets,
+            defense_needs,
+            planets,
+            obs,
+            angular_velocity,
+            comet_ids,
+            available,
+        )
+        if defense is not None:
+            target, angle, ships = defense
+            moves.append([source.id, angle, ships])
+            defense_needs[target.id] = max(0, defense_needs.get(target.id, 0) - ships)
+            planned_by_target[target.id] = planned_by_target.get(target.id, 0) + ships
+            continue
+
+        choice = choose_target(
+            source,
+            targets,
+            planets,
+            obs,
+            angular_velocity,
+            comet_ids,
+            incoming,
+            planned_by_target,
+            player,
+            available,
+        )
         if choice is None:
             continue
 
@@ -57,6 +100,7 @@ def _agent_impl(obs: Any) -> List[List[float]]:
             continue
 
         moves.append([source.id, angle, ships])
+        planned_by_target[target.id] = planned_by_target.get(target.id, 0) + ships
 
     return moves
 
@@ -68,16 +112,25 @@ def choose_target(
     obs: Any,
     angular_velocity: float,
     comet_ids: set,
+    incoming: dict[int, dict[int, int]],
+    planned_by_target: dict[int, int],
+    player: int,
     available: int,
 ) -> Tuple[Planet, float, int] | None:
     best: Tuple[float, Planet, float, int] | None = None
 
     for target in targets:
-        base_needed = ships_needed(target)
-        if base_needed > max(available, int(available * 1.35)):
+        incoming_by_owner = incoming.get(target.id, {})
+        friendly_incoming = incoming_by_owner.get(player, 0) + planned_by_target.get(target.id, 0)
+        opposing_incoming = sum(ships for owner, ships in incoming_by_owner.items() if owner != player)
+        needed = remaining_ships_needed(target, player, friendly_incoming, opposing_incoming)
+        if needed <= 0:
             continue
 
-        ships = min(available, max(base_needed, int(base_needed * 1.12)))
+        if needed > max(available, int(available * 1.35)):
+            continue
+
+        ships = min(available, max(needed, int(needed * 1.12)))
         if ships <= 0:
             continue
 
@@ -93,7 +146,7 @@ def choose_target(
             continue
 
         eta = distance / fleet_speed(ships)
-        score = target_score(target, distance, eta, base_needed, comet_ids)
+        score = target_score(target, distance, eta, needed, comet_ids)
         angle = math.atan2(ty - source.y, tx - source.x)
 
         if best is None or score > best[0]:
@@ -103,13 +156,23 @@ def choose_target(
         _, target, angle, ships = best
         return target, angle, ships
 
-    return pressure_weak_enemy(source, targets, all_planets, available)
+    return pressure_weak_enemy(source, targets, all_planets, incoming, planned_by_target, player, available)
 
 
-def ships_needed(target: Planet) -> int:
+def remaining_ships_needed(
+    target: Planet,
+    player: int,
+    friendly_incoming: int = 0,
+    opposing_incoming: int = 0,
+) -> int:
     if target.owner == -1:
-        return int(target.ships + 1)
-    return int(target.ships + max(2, target.production + 1))
+        needed = target.ships + 1
+    elif target.owner == player:
+        needed = 0
+    else:
+        needed = target.ships + max(2, target.production + 1)
+
+    return int(math.ceil(needed + opposing_incoming - friendly_incoming))
 
 
 def reserve_for(source: Planet) -> int:
@@ -128,6 +191,9 @@ def pressure_weak_enemy(
     source: Planet,
     targets: Sequence[Planet],
     all_planets: Sequence[Planet],
+    incoming: dict[int, dict[int, int]],
+    planned_by_target: dict[int, int],
+    player: int,
     available: int,
 ) -> Tuple[Planet, float, int] | None:
     enemies = [p for p in targets if p.owner != -1]
@@ -135,6 +201,11 @@ def pressure_weak_enemy(
         return None
 
     for target in sorted(enemies, key=lambda p: (p.ships, distance_between(source, p))):
+        incoming_by_owner = incoming.get(target.id, {})
+        friendly_incoming = incoming_by_owner.get(player, 0) + planned_by_target.get(target.id, 0)
+        if friendly_incoming >= target.ships:
+            continue
+
         if crosses_sun(source.x, source.y, target.x, target.y):
             continue
         if not path_clear(source, target, target.x, target.y, all_planets):
@@ -145,6 +216,71 @@ def pressure_weak_enemy(
         return target, angle, ships
 
     return None
+
+
+def build_defense_needs(
+    my_planets: Sequence[Planet],
+    incoming: dict[int, dict[int, int]],
+    player: int,
+) -> dict[int, int]:
+    needs: dict[int, int] = {}
+    for planet in my_planets:
+        incoming_by_owner = incoming.get(planet.id, {})
+        friendly = incoming_by_owner.get(player, 0)
+        hostile = sum(ships for owner, ships in incoming_by_owner.items() if owner != player)
+        need = hostile + 2 - friendly - planet.ships
+        if need > 0:
+            needs[planet.id] = int(need)
+    return needs
+
+
+def threatened_reserve(planet: Planet, incoming: dict[int, dict[int, int]], player: int) -> int:
+    incoming_by_owner = incoming.get(planet.id, {})
+    friendly = incoming_by_owner.get(player, 0)
+    hostile = sum(ships for owner, ships in incoming_by_owner.items() if owner != player)
+    return max(0, hostile - friendly)
+
+
+def choose_defense_target(
+    source: Planet,
+    my_planets: Sequence[Planet],
+    defense_needs: dict[int, int],
+    all_planets: Sequence[Planet],
+    obs: Any,
+    angular_velocity: float,
+    comet_ids: set,
+    available: int,
+) -> Tuple[Planet, float, int] | None:
+    best: Tuple[float, Planet, float, int] | None = None
+
+    for target in my_planets:
+        needed = defense_needs.get(target.id, 0)
+        if target.id == source.id or needed <= 0:
+            continue
+
+        ships = min(available, needed)
+        if ships <= 0:
+            continue
+
+        tx, ty = predicted_target_position(target, source, ships, obs, angular_velocity, comet_ids)
+        if crosses_sun(source.x, source.y, tx, ty):
+            continue
+        if not path_clear(source, target, tx, ty, all_planets):
+            continue
+
+        distance = math.hypot(tx - source.x, ty - source.y)
+        eta = distance / fleet_speed(ships)
+        score = needed * 3.0 + target.production * 10.0 - eta - distance * 0.15
+        angle = math.atan2(ty - source.y, tx - source.x)
+
+        if best is None or score > best[0]:
+            best = (score, target, angle, ships)
+
+    if best is None:
+        return None
+
+    _, target, angle, ships = best
+    return target, angle, ships
 
 
 def predicted_target_position(
@@ -210,6 +346,67 @@ def comet_position_after(planet_id: int, turns: float, obs: Any) -> Tuple[float,
         future_index = min(len(path) - 1, max(0, path_index + int(round(turns))))
         point = path[future_index]
         return float(point[0]), float(point[1])
+
+    return None
+
+
+def build_incoming_map(
+    fleets: Sequence[Fleet],
+    planets: Sequence[Planet],
+    obs: Any,
+    angular_velocity: float,
+    comet_ids: set,
+) -> dict[int, dict[int, int]]:
+    incoming: dict[int, dict[int, int]] = {}
+    for fleet in fleets:
+        target = projected_fleet_target(fleet, planets, obs, angular_velocity, comet_ids)
+        if target is None:
+            continue
+
+        by_owner = incoming.setdefault(target.id, {})
+        by_owner[fleet.owner] = by_owner.get(fleet.owner, 0) + int(fleet.ships)
+
+    return incoming
+
+
+def projected_fleet_target(
+    fleet: Fleet,
+    planets: Sequence[Planet],
+    obs: Any,
+    angular_velocity: float,
+    comet_ids: set,
+    max_turns: int = 80,
+) -> Planet | None:
+    speed = fleet_speed(fleet.ships)
+    dx = math.cos(fleet.angle) * speed
+    dy = math.sin(fleet.angle) * speed
+    x = fleet.x
+    y = fleet.y
+
+    for turn in range(1, max_turns + 1):
+        nx = x + dx
+        ny = y + dy
+
+        if crosses_sun(x, y, nx, ny):
+            return None
+
+        hits: List[Tuple[float, Planet]] = []
+        for planet in planets:
+            if planet.id == fleet.from_planet_id:
+                continue
+
+            px, py = position_after(planet, turn, obs, angular_velocity, comet_ids)
+            if distance_to_segment(px, py, x, y, nx, ny) <= planet.radius + 0.2:
+                along = projection_fraction(px, py, x, y, nx, ny)
+                hits.append((turn + along, planet))
+
+        if hits:
+            return min(hits, key=lambda item: item[0])[1]
+
+        if nx < 0.0 or nx > BOARD_SIZE or ny < 0.0 or ny > BOARD_SIZE:
+            return None
+
+        x, y = nx, ny
 
     return None
 

@@ -35,6 +35,46 @@ class AgentSmokeTest(unittest.TestCase):
     def test_empty_when_no_planets(self):
         self.assertEqual(agent({"player": 0, "planets": []}), [])
 
+    def test_does_not_duplicate_sufficient_friendly_incoming(self):
+        obs = {
+            "player": 0,
+            "angular_velocity": 0.0,
+            "comet_planet_ids": [],
+            "comets": [],
+            "planets": [
+                [0, 0, 10.0, 10.0, 2.0, 60, 3],
+                [1, -1, 30.0, 10.0, 2.0, 20, 3],
+            ],
+            "fleets": [
+                [99, 0, 20.0, 10.0, 0.0, 0, 25],
+            ],
+        }
+
+        self.assertEqual(agent(obs), [])
+
+    def test_reinforces_threatened_owned_planet_first(self):
+        obs = {
+            "player": 0,
+            "angular_velocity": 0.0,
+            "comet_planet_ids": [],
+            "comets": [],
+            "planets": [
+                [0, 0, 10.0, 10.0, 2.0, 60, 3],
+                [1, 0, 30.0, 10.0, 2.0, 5, 3],
+                [2, 1, 80.0, 80.0, 2.0, 60, 3],
+            ],
+            "fleets": [
+                [99, 1, 20.0, 10.0, 0.0, 2, 20],
+            ],
+        }
+
+        moves = agent(obs)
+
+        self.assertGreaterEqual(len(moves), 1)
+        self.assertEqual(moves[0][0], 0)
+        self.assertAlmostEqual(moves[0][1], 0.0)
+        self.assertGreaterEqual(moves[0][2], 17)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,6 +13,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python -m unittest discover -s tests
 python scripts/run_local.py --episodes 3
+python scripts/run_local.py --episodes 3 --opponents random random random
 ```
 
 Submit the standalone agent:

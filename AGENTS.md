@@ -5,6 +5,7 @@
 ```bash
 python -m unittest discover -s tests
 python scripts/run_local.py --episodes 3
+python scripts/run_local.py --episodes 3 --opponents random random random
 ```
 
 Use Python 3.12 for local evaluation. The default macOS Python 3.9 cannot install
