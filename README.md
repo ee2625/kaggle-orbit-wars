@@ -33,6 +33,7 @@ kaggle competitions submit orbit-wars -f main.py -m "baseline v1"
 - `scripts/league_backtest.py` - local ladder simulator with Kaggle-style Gaussian skill ratings.
 - `scripts/analyze_replay.py` - replay diagnostics for expansion timing, launches, and fleet losses.
 - `scripts/collect_feedback.py` - Kaggle episode collector that downloads new replays/logs and writes a feedback summary.
+- `scripts/evaluate_replay_suite.py` - counterfactual replay suite that tests `main.py` on collected maps against recorded opponent actions.
 - `tests/test_agent_smoke.py` - fast checks that the agent returns legal-looking moves.
 - `docs/rules_checklist.md` - practical compliance notes from the competition rules.
 - `references/` - local reference file index; raw uploads are kept ignored.
@@ -102,6 +103,16 @@ python scripts/collect_feedback.py \
 
 The collector is incremental. It keeps `manifest.json`, writes
 `summary.md`, and skips replay/log files that have already been downloaded.
+
+Run the current bot against collected replay maps with recorded opponent actions:
+
+```bash
+.venv/bin/python scripts/evaluate_replay_suite.py \
+  backtests/kaggle_feedback/replays \
+  --agent main.py \
+  --team orf527 \
+  --json backtests/kaggle_feedback/replay_suite_main.json
+```
 
 ## Strategy Notes
 

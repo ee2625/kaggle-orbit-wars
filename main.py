@@ -131,6 +131,10 @@ def choose_target(
     available: int,
 ) -> Tuple[Planet, float, int] | None:
     best: Tuple[float, Planet, float, int] | None = None
+    has_affordable_neutral = any(
+        is_affordable_neutral(target, player, incoming, planned_by_target, available)
+        for target in targets
+    )
 
     for target in targets:
         incoming_by_owner = incoming.get(target.id, {})
@@ -140,7 +144,7 @@ def choose_target(
         if needed <= 0:
             continue
 
-        if target.owner != -1 and should_delay_enemy_attack(step, my_planet_count, owned_ratio):
+        if target.owner != -1 and should_delay_enemy_attack(step, my_planet_count, owned_ratio, has_affordable_neutral):
             continue
 
         if needed > available:
@@ -192,20 +196,24 @@ def choose_target(
         _, target, angle, ships = best
         return target, angle, ships
 
-    return pressure_weak_enemy(
-        source,
-        targets,
-        all_planets,
-        obs,
-        angular_velocity,
-        comet_ids,
-        incoming,
-        planned_by_target,
-        player,
-        my_planet_count,
-        step,
-        available,
-    )
+    return None
+
+
+def is_affordable_neutral(
+    target: Planet,
+    player: int,
+    incoming: dict[int, dict[int, int]],
+    planned_by_target: dict[int, int],
+    available: int,
+) -> bool:
+    if target.owner != -1:
+        return False
+
+    incoming_by_owner = incoming.get(target.id, {})
+    friendly_incoming = incoming_by_owner.get(player, 0) + planned_by_target.get(target.id, 0)
+    opposing_incoming = sum(ships for owner, ships in incoming_by_owner.items() if owner != player)
+    needed = remaining_ships_needed(target, player, friendly_incoming, opposing_incoming)
+    return 0 < needed <= available
 
 
 def remaining_ships_needed(
@@ -249,10 +257,17 @@ def reserve_for(source: Planet, step: int, my_planet_count: int) -> int:
     return max(2, source.production + 1)
 
 
-def should_delay_enemy_attack(step: int, my_planet_count: int, owned_ratio: float) -> bool:
-    if my_planet_count < 4 and step < 90:
+def should_delay_enemy_attack(
+    step: int,
+    my_planet_count: int,
+    owned_ratio: float,
+    has_affordable_neutral: bool,
+) -> bool:
+    if has_affordable_neutral and (my_planet_count < 10 or step < 170):
         return True
-    if owned_ratio < 0.22 and step < 120:
+    if my_planet_count < 6 and step < 140:
+        return True
+    if owned_ratio < 0.28 and step < 170:
         return True
     return False
 
@@ -276,49 +291,6 @@ def target_score(
     payoff = target.production * 34.0 + target.radius * 2.0 + neutral_bonus + enemy_bonus + early_economy_bonus + late_enemy_bonus
     cost = needed * 0.46 + distance * 0.22 + eta * 0.34 + comet_penalty + enemy_timing_penalty
     return payoff - cost
-
-
-def pressure_weak_enemy(
-    source: Planet,
-    targets: Sequence[Planet],
-    all_planets: Sequence[Planet],
-    obs: Any,
-    angular_velocity: float,
-    comet_ids: set,
-    incoming: dict[int, dict[int, int]],
-    planned_by_target: dict[int, int],
-    player: int,
-    my_planet_count: int,
-    step: int,
-    available: int,
-) -> Tuple[Planet, float, int] | None:
-    enemies = [p for p in targets if p.owner != -1]
-    if not enemies or available < 8:
-        return None
-    if my_planet_count < 5 and step < 110:
-        return None
-
-    for target in sorted(enemies, key=lambda p: (p.ships, distance_between(source, p))):
-        incoming_by_owner = incoming.get(target.id, {})
-        friendly_incoming = incoming_by_owner.get(player, 0) + planned_by_target.get(target.id, 0)
-        if friendly_incoming >= target.ships:
-            continue
-
-        ships = max(1, int(available * 0.55))
-        aim = aim_target_position(target, source, ships, obs, angular_velocity, comet_ids)
-        if aim is None:
-            continue
-        tx, ty = aim
-
-        if crosses_sun(source.x, source.y, tx, ty):
-            continue
-        if not path_clear(source, target, tx, ty, all_planets):
-            continue
-
-        angle = math.atan2(ty - source.y, tx - source.x)
-        return target, angle, ships
-
-    return None
 
 
 def build_defense_needs(
