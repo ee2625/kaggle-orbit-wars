@@ -10,6 +10,11 @@ CENTER = (50.0, 50.0)
 SUN_RADIUS = 10.0
 ROTATION_RADIUS_LIMIT = 50.0
 MAX_SPEED = 6.0
+MIN_ATTACK_SHIPS = 10
+CAPTURE_SAFETY_FACTOR = 1.16
+PARTIAL_NEUTRAL_ALLOWANCE = 1.2
+PARTIAL_ENEMY_ALLOWANCE = 1.3
+PROJECTED_FLEET_TURNS = 55
 
 
 @dataclass(frozen=True)
@@ -54,6 +59,7 @@ def _agent_impl(obs: Any) -> List[List[float]]:
     incoming = build_incoming_map(fleets, planets, obs, angular_velocity, comet_ids)
     planned_by_target: dict[int, int] = {}
     defense_needs = build_defense_needs(my_planets, incoming, player)
+    owned_ratio = len(my_planets) / max(1, len([p for p in planets if p.id not in comet_ids]))
     moves: List[List[float]] = []
 
     # Strong planets should decide first, before smaller worlds spend themselves.
@@ -90,6 +96,7 @@ def _agent_impl(obs: Any) -> List[List[float]]:
             incoming,
             planned_by_target,
             player,
+            owned_ratio,
             available,
         )
         if choice is None:
@@ -115,6 +122,7 @@ def choose_target(
     incoming: dict[int, dict[int, int]],
     planned_by_target: dict[int, int],
     player: int,
+    owned_ratio: float,
     available: int,
 ) -> Tuple[Planet, float, int] | None:
     best: Tuple[float, Planet, float, int] | None = None
@@ -127,10 +135,13 @@ def choose_target(
         if needed <= 0:
             continue
 
-        if needed > max(available, int(available * 1.35)):
+        partial_allowance = PARTIAL_NEUTRAL_ALLOWANCE if target.owner == -1 else PARTIAL_ENEMY_ALLOWANCE
+        if needed > max(available, int(available * partial_allowance)):
+            continue
+        if target.owner != -1 and owned_ratio < 0.35 and needed > int(available * 0.65):
             continue
 
-        ships = min(available, max(needed, int(needed * 1.12)))
+        ships = ships_to_send(needed, available)
         if ships <= 0:
             continue
 
@@ -146,7 +157,19 @@ def choose_target(
             continue
 
         eta = distance / fleet_speed(ships)
-        score = target_score(target, distance, eta, needed, comet_ids)
+        arrival_needed = needed_after_travel(target, needed, eta)
+        if arrival_needed > ships and arrival_needed <= available:
+            ships = ships_to_send(arrival_needed, available)
+            tx, ty = predicted_target_position(target, source, ships, obs, angular_velocity, comet_ids)
+            distance = math.hypot(tx - source.x, ty - source.y)
+            if crosses_sun(source.x, source.y, tx, ty):
+                continue
+            if not path_clear(source, target, tx, ty, all_planets):
+                continue
+            eta = distance / fleet_speed(ships)
+            arrival_needed = needed_after_travel(target, needed, eta)
+
+        score = target_score(target, distance, eta, arrival_needed, comet_ids, owned_ratio)
         angle = math.atan2(ty - source.y, tx - source.x)
 
         if best is None or score > best[0]:
@@ -175,15 +198,39 @@ def remaining_ships_needed(
     return int(math.ceil(needed + opposing_incoming - friendly_incoming))
 
 
+def needed_after_travel(target: Planet, needed: int, eta: float) -> int:
+    if target.owner == -1:
+        return needed
+
+    production_buffer = int(math.ceil(eta * target.production * 0.65))
+    return needed + production_buffer
+
+
+def ships_to_send(needed: int, available: int) -> int:
+    if needed > available:
+        return max(1, available)
+
+    padded = max(needed, int(math.ceil(needed * CAPTURE_SAFETY_FACTOR)), MIN_ATTACK_SHIPS)
+    return min(available, padded)
+
+
 def reserve_for(source: Planet) -> int:
     return max(4, int(8 + source.production * 2))
 
 
-def target_score(target: Planet, distance: float, eta: float, needed: int, comet_ids: set) -> float:
-    owner_bonus = 12.0 if target.owner != -1 else 0.0
-    comet_penalty = 10.0 if target.id in comet_ids else 0.0
-    payoff = target.production * 22.0 + target.radius * 2.0 + owner_bonus
-    cost = needed * 0.55 + distance * 0.35 + eta * 0.2 + comet_penalty
+def target_score(
+    target: Planet,
+    distance: float,
+    eta: float,
+    needed: int,
+    comet_ids: set,
+    owned_ratio: float,
+) -> float:
+    owner_bonus = 18.0 if target.owner != -1 else 0.0
+    comet_penalty = 24.0 if target.id in comet_ids else 0.0
+    enemy_timing_penalty = max(0.0, 0.5 - owned_ratio) * 80.0 if target.owner != -1 else 0.0
+    payoff = target.production * 26.0 + target.radius * 2.0 + owner_bonus
+    cost = needed * 0.52 + distance * 0.28 + eta * 0.45 + comet_penalty + enemy_timing_penalty
     return payoff - cost
 
 
@@ -375,7 +422,7 @@ def projected_fleet_target(
     obs: Any,
     angular_velocity: float,
     comet_ids: set,
-    max_turns: int = 80,
+    max_turns: int = PROJECTED_FLEET_TURNS,
 ) -> Planet | None:
     speed = fleet_speed(fleet.ships)
     dx = math.cos(fleet.angle) * speed

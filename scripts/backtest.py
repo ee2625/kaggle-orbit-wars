@@ -29,7 +29,9 @@ class EpisodeResult:
     result: str
     rewards: list[float | int | None]
     statuses: list[str]
+    scores: list[int]
     margin: float | None
+    score_margin: int | None
     duration_s: float
     steps: int
 
@@ -85,6 +87,41 @@ def reward_margin(rewards: list[float | int | None], agent_index: int) -> float 
     return float(rewards[agent_index]) - max(opponent_rewards)
 
 
+def final_scores(final_observation: Any, player_count: int) -> list[int]:
+    scores = [0 for _ in range(player_count)]
+    planets = get_observation_field(final_observation, "planets", []) or []
+    fleets = get_observation_field(final_observation, "fleets", []) or []
+
+    for planet in planets:
+        owner = int(planet[1])
+        if 0 <= owner < player_count:
+            scores[owner] += int(planet[5])
+
+    for fleet in fleets:
+        owner = int(fleet[1])
+        if 0 <= owner < player_count:
+            scores[owner] += int(fleet[6])
+
+    return scores
+
+
+def get_observation_field(observation: Any, name: str, default: Any = None) -> Any:
+    if isinstance(observation, dict):
+        return observation.get(name, default)
+    return getattr(observation, name, default)
+
+
+def score_margin(scores: list[int], agent_index: int) -> int | None:
+    if not scores or agent_index >= len(scores):
+        return None
+
+    opponent_scores = [score for index, score in enumerate(scores) if index != agent_index]
+    if not opponent_scores:
+        return None
+
+    return scores[agent_index] - max(opponent_scores)
+
+
 def summarize_results(results: list[EpisodeResult]) -> dict[str, Any]:
     episodes = len(results)
     wins = sum(1 for result in results if result.result == "win")
@@ -93,6 +130,7 @@ def summarize_results(results: list[EpisodeResult]) -> dict[str, Any]:
     errors = sum(1 for result in results if result.result == "error")
     unknown = sum(1 for result in results if result.result == "unknown")
     margins = [result.margin for result in results if result.margin is not None]
+    score_margins = [result.score_margin for result in results if result.score_margin is not None]
     durations = [result.duration_s for result in results]
 
     return {
@@ -105,6 +143,8 @@ def summarize_results(results: list[EpisodeResult]) -> dict[str, Any]:
         "win_rate": wins / episodes if episodes else 0.0,
         "non_loss_rate": (wins + ties) / episodes if episodes else 0.0,
         "avg_margin": statistics.fmean(margins) if margins else None,
+        "avg_score_margin": statistics.fmean(score_margins) if score_margins else None,
+        "min_score_margin": min(score_margins) if score_margins else None,
         "avg_duration_s": statistics.fmean(durations) if durations else None,
     }
 
@@ -141,6 +181,7 @@ def run_episode(
     final = env.steps[-1] if env.steps else []
     rewards = [state.reward for state in final]
     statuses = [state.status for state in final]
+    scores = final_scores(final[0].observation, len(lineup)) if final else []
     result = classify_result(rewards, statuses, agent_index)
 
     return EpisodeResult(
@@ -153,7 +194,9 @@ def run_episode(
         result=result,
         rewards=rewards,
         statuses=statuses,
+        scores=scores,
         margin=reward_margin(rewards, agent_index),
+        score_margin=score_margin(scores, agent_index),
         duration_s=duration_s,
         steps=len(env.steps),
     )
@@ -196,6 +239,7 @@ def run_backtest(
                 print(
                     f"agent={Path(agent).name} episode={result.episode} seed={seed} "
                     f"seat={agent_seat} result={result.result} rewards={result.rewards} "
+                    f"scores={result.scores} score_margin={result.score_margin} "
                     f"statuses={result.statuses} duration={result.duration_s:.2f}s"
                 )
 
@@ -214,13 +258,16 @@ def print_summaries(summaries: dict[str, dict[str, Any]]) -> None:
     print("Summary")
     for agent, summary in summaries.items():
         avg_margin = summary["avg_margin"]
+        avg_score_margin = summary["avg_score_margin"]
         avg_duration = summary["avg_duration_s"]
         margin_text = "n/a" if avg_margin is None else f"{avg_margin:.3f}"
+        score_margin_text = "n/a" if avg_score_margin is None else f"{avg_score_margin:.1f}"
         duration_text = "n/a" if avg_duration is None else f"{avg_duration:.2f}s"
         print(
             f"{Path(agent).name}: {summary['wins']}W-{summary['ties']}T-{summary['losses']}L "
             f"errors={summary['errors']} unknown={summary['unknown']} "
             f"win_rate={summary['win_rate']:.1%} avg_margin={margin_text} "
+            f"avg_score_margin={score_margin_text} "
             f"avg_duration={duration_text}"
         )
 
@@ -245,7 +292,9 @@ def write_csv(path: Path, results: list[EpisodeResult]) -> None:
                 "result",
                 "rewards",
                 "statuses",
+                "scores",
                 "margin",
+                "score_margin",
                 "duration_s",
                 "steps",
             ],
@@ -257,6 +306,7 @@ def write_csv(path: Path, results: list[EpisodeResult]) -> None:
             row["lineup"] = "|".join(result.lineup)
             row["rewards"] = json.dumps(result.rewards)
             row["statuses"] = json.dumps(result.statuses)
+            row["scores"] = json.dumps(result.scores)
             writer.writerow(row)
 
 
