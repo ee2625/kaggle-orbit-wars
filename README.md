@@ -16,6 +16,7 @@ python scripts/run_local.py --episodes 3
 python scripts/run_local.py --episodes 3 --opponents random random random
 python scripts/backtest.py --episodes 10 --out-dir backtests
 python scripts/league_backtest.py --agent main.py --agent random --games 20 --out-dir backtests
+python scripts/collect_feedback.py --latest-submissions 2 --download-logs
 ```
 
 Submit the standalone agent:
@@ -31,6 +32,7 @@ kaggle competitions submit orbit-wars -f main.py -m "baseline v1"
 - `scripts/backtest.py` - repeatable batch backtester with summaries and JSON/CSV output.
 - `scripts/league_backtest.py` - local ladder simulator with Kaggle-style Gaussian skill ratings.
 - `scripts/analyze_replay.py` - replay diagnostics for expansion timing, launches, and fleet losses.
+- `scripts/collect_feedback.py` - Kaggle episode collector that downloads new replays/logs and writes a feedback summary.
 - `tests/test_agent_smoke.py` - fast checks that the agent returns legal-looking moves.
 - `docs/rules_checklist.md` - practical compliance notes from the competition rules.
 - `references/` - local reference file index; raw uploads are kept ignored.
@@ -87,6 +89,19 @@ Analyze downloaded Kaggle replays to find failure modes:
 ```bash
 python scripts/analyze_replay.py backtests/replays/v2_public/episode-75784648-replay.json
 ```
+
+Collect new Kaggle feedback for the latest two submissions without submitting a
+new bot:
+
+```bash
+python scripts/collect_feedback.py \
+  --latest-submissions 2 \
+  --download-logs \
+  --out-dir backtests/kaggle_feedback
+```
+
+The collector is incremental. It keeps `manifest.json`, writes
+`summary.md`, and skips replay/log files that have already been downloaded.
 
 ## Strategy Notes
 
