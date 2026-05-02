@@ -16,6 +16,7 @@ venv/
 orbit-wars-data/
 replays/
 logs/
+backtests/
 
 # Raw reference files and local Kaggle artifacts.
 references/raw/
