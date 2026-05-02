@@ -1,0 +1,28 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+.env
+.venv/
+venv/
+
+*.log
+*.tmp
+*.tar.gz
+
+orbit-wars-data/
+replays/
+logs/
+
+# Starter-kit downloads and local Kaggle artifacts.
+README (*)*.md
+main copy.py
+download.txt
+getting-started.ipynb
+getting-started.log
+orbit-wars-agent-ow-proto.ipynb
+orbit-wars.zip
+orbit-wars/
