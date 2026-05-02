@@ -15,6 +15,7 @@ CAPTURE_SAFETY_FACTOR = 1.16
 PARTIAL_NEUTRAL_ALLOWANCE = 1.2
 PARTIAL_ENEMY_ALLOWANCE = 1.3
 PROJECTED_FLEET_TURNS = 55
+MAX_INTERCEPT_TURNS = 80
 
 
 @dataclass(frozen=True)
@@ -145,7 +146,10 @@ def choose_target(
         if ships <= 0:
             continue
 
-        tx, ty = predicted_target_position(target, source, ships, obs, angular_velocity, comet_ids)
+        aim = aim_target_position(target, source, ships, obs, angular_velocity, comet_ids)
+        if aim is None:
+            continue
+        tx, ty = aim
         distance = math.hypot(tx - source.x, ty - source.y)
         if distance <= source.radius + target.radius:
             continue
@@ -160,7 +164,10 @@ def choose_target(
         arrival_needed = needed_after_travel(target, needed, eta)
         if arrival_needed > ships and arrival_needed <= available:
             ships = ships_to_send(arrival_needed, available)
-            tx, ty = predicted_target_position(target, source, ships, obs, angular_velocity, comet_ids)
+            aim = aim_target_position(target, source, ships, obs, angular_velocity, comet_ids)
+            if aim is None:
+                continue
+            tx, ty = aim
             distance = math.hypot(tx - source.x, ty - source.y)
             if crosses_sun(source.x, source.y, tx, ty):
                 continue
@@ -179,7 +186,18 @@ def choose_target(
         _, target, angle, ships = best
         return target, angle, ships
 
-    return pressure_weak_enemy(source, targets, all_planets, incoming, planned_by_target, player, available)
+    return pressure_weak_enemy(
+        source,
+        targets,
+        all_planets,
+        obs,
+        angular_velocity,
+        comet_ids,
+        incoming,
+        planned_by_target,
+        player,
+        available,
+    )
 
 
 def remaining_ships_needed(
@@ -238,6 +256,9 @@ def pressure_weak_enemy(
     source: Planet,
     targets: Sequence[Planet],
     all_planets: Sequence[Planet],
+    obs: Any,
+    angular_velocity: float,
+    comet_ids: set,
     incoming: dict[int, dict[int, int]],
     planned_by_target: dict[int, int],
     player: int,
@@ -253,13 +274,18 @@ def pressure_weak_enemy(
         if friendly_incoming >= target.ships:
             continue
 
-        if crosses_sun(source.x, source.y, target.x, target.y):
+        ships = max(1, int(available * 0.55))
+        aim = aim_target_position(target, source, ships, obs, angular_velocity, comet_ids)
+        if aim is None:
             continue
-        if not path_clear(source, target, target.x, target.y, all_planets):
+        tx, ty = aim
+
+        if crosses_sun(source.x, source.y, tx, ty):
+            continue
+        if not path_clear(source, target, tx, ty, all_planets):
             continue
 
-        ships = max(1, int(available * 0.55))
-        angle = math.atan2(target.y - source.y, target.x - source.x)
+        angle = math.atan2(ty - source.y, tx - source.x)
         return target, angle, ships
 
     return None
@@ -309,7 +335,10 @@ def choose_defense_target(
         if ships <= 0:
             continue
 
-        tx, ty = predicted_target_position(target, source, ships, obs, angular_velocity, comet_ids)
+        aim = aim_target_position(target, source, ships, obs, angular_velocity, comet_ids)
+        if aim is None:
+            continue
+        tx, ty = aim
         if crosses_sun(source.x, source.y, tx, ty):
             continue
         if not path_clear(source, target, tx, ty, all_planets):
@@ -328,6 +357,59 @@ def choose_defense_target(
 
     _, target, angle, ships = best
     return target, angle, ships
+
+
+def aim_target_position(
+    target: Planet,
+    source: Planet,
+    ships: int,
+    obs: Any,
+    angular_velocity: float,
+    comet_ids: set,
+) -> Tuple[float, float] | None:
+    if is_moving_planet(target, angular_velocity, comet_ids):
+        return intercept_target_position(target, source, ships, obs, angular_velocity, comet_ids)
+
+    return predicted_target_position(target, source, ships, obs, angular_velocity, comet_ids)
+
+
+def is_moving_planet(planet: Planet, angular_velocity: float, comet_ids: set) -> bool:
+    if planet.id in comet_ids:
+        return True
+
+    if angular_velocity == 0.0:
+        return False
+
+    return distance_from_center(planet.x, planet.y) + planet.radius < ROTATION_RADIUS_LIMIT
+
+
+def intercept_target_position(
+    target: Planet,
+    source: Planet,
+    ships: int,
+    obs: Any,
+    angular_velocity: float,
+    comet_ids: set,
+) -> Tuple[float, float] | None:
+    speed = fleet_speed(ships)
+    best: Tuple[float, float, float] | None = None
+
+    for turn in range(1, MAX_INTERCEPT_TURNS + 1):
+        tx, ty = position_after(target, float(turn), obs, angular_velocity, comet_ids)
+        travel_turns = math.hypot(tx - source.x, ty - source.y) / speed
+        error = abs(travel_turns - turn)
+
+        if best is None or error < best[0]:
+            best = (error, tx, ty)
+
+    if best is None:
+        return None
+
+    tolerance = max(0.65, min(1.35, (target.radius + 0.35) / speed + 0.35))
+    if best[0] > tolerance:
+        return None
+
+    return best[1], best[2]
 
 
 def predicted_target_position(
@@ -362,7 +444,7 @@ def position_after(
 
     dx = planet.x - CENTER[0]
     dy = planet.y - CENTER[1]
-    orbital_radius = math.hypot(dx, dy)
+    orbital_radius = distance_from_center(planet.x, planet.y)
     if orbital_radius + planet.radius >= ROTATION_RADIUS_LIMIT or angular_velocity == 0.0:
         return planet.x, planet.y
 
@@ -515,6 +597,10 @@ def projection_fraction(px: float, py: float, x1: float, y1: float, x2: float, y
 
 def distance_between(a: Planet, b: Planet) -> float:
     return math.hypot(a.x - b.x, a.y - b.y)
+
+
+def distance_from_center(x: float, y: float) -> float:
+    return math.hypot(x - CENTER[0], y - CENTER[1])
 
 
 def get_field(obj: Any, name: str, default: Any = None) -> Any:
