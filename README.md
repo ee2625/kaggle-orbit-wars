@@ -29,6 +29,7 @@ kaggle competitions submit orbit-wars -f main.py -m "baseline v1"
 - `scripts/run_local.py` - local match runner against Kaggle's built-in agents.
 - `scripts/backtest.py` - repeatable batch backtester with summaries and JSON/CSV output.
 - `tests/test_agent_smoke.py` - fast checks that the agent returns legal-looking moves.
+- `docs/rules_checklist.md` - practical compliance notes from the competition rules.
 - `references/` - local reference file index; raw uploads are kept ignored.
 
 ## Backtesting

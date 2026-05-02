@@ -18,6 +18,8 @@ the required Orbit Wars Kaggle environment version.
 - Kaggle loads the last callable in a submitted file, so keep the public
   `agent(obs)` wrapper as the final function in `main.py`.
 - The agent must return `[[from_planet_id, angle_in_radians, num_ships], ...]`.
+- `main.py` must not use network, filesystem state, environment variables, or
+  wall-clock/random behavior during evaluation.
 - Keep tests fast; use `scripts/run_local.py` for actual environment matches.
 
 ## Strategy Direction
