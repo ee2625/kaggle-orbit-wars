@@ -15,6 +15,7 @@ python -m unittest discover -s tests
 python scripts/run_local.py --episodes 3
 python scripts/run_local.py --episodes 3 --opponents random random random
 python scripts/backtest.py --episodes 10 --out-dir backtests
+python scripts/league_backtest.py --agent main.py --agent random --games 20 --out-dir backtests
 ```
 
 Submit the standalone agent:
@@ -28,6 +29,7 @@ kaggle competitions submit orbit-wars -f main.py -m "baseline v1"
 - `main.py` - Kaggle submission entrypoint with `agent(obs)`.
 - `scripts/run_local.py` - local match runner against Kaggle's built-in agents.
 - `scripts/backtest.py` - repeatable batch backtester with summaries and JSON/CSV output.
+- `scripts/league_backtest.py` - local ladder simulator with Kaggle-style Gaussian skill ratings.
 - `tests/test_agent_smoke.py` - fast checks that the agent returns legal-looking moves.
 - `docs/rules_checklist.md` - practical compliance notes from the competition rules.
 - `references/` - local reference file index; raw uploads are kept ignored.
@@ -50,6 +52,33 @@ Compare multiple bot files:
 
 ```bash
 python scripts/backtest.py --agent main.py --agent path/to/other_bot.py --episodes 25 --out-dir backtests
+```
+
+Run a local ladder that scores like the Kaggle simulation leaderboard: each bot
+starts at `mu=600`, has Gaussian uncertainty `sigma`, and rating updates use only
+win/tie/loss ordering, not final ship margin.
+
+```bash
+python scripts/league_backtest.py \
+  --agent main.py \
+  --agent backtests/agents/submitted_133182e.py \
+  --agent random \
+  --games 30 \
+  --schedule ladder \
+  --out-dir backtests/league
+```
+
+For 4-player local games, provide at least four agents:
+
+```bash
+python scripts/league_backtest.py \
+  --players 4 \
+  --agent main.py \
+  --agent backtests/agents/submitted_133182e.py \
+  --agent random \
+  --agent random \
+  --games 20 \
+  --out-dir backtests/league_4p
 ```
 
 ## Strategy Notes
