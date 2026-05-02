@@ -17,7 +17,8 @@ orbit-wars-data/
 replays/
 logs/
 
-# Starter-kit downloads and local Kaggle artifacts.
+# Raw reference files and local Kaggle artifacts.
+references/raw/
 README (*)*.md
 main copy.py
 download.txt

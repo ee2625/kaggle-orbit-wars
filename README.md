@@ -27,6 +27,7 @@ kaggle competitions submit orbit-wars -f main.py -m "baseline v1"
 - `main.py` - Kaggle submission entrypoint with `agent(obs)`.
 - `scripts/run_local.py` - local match runner against Kaggle's built-in agents.
 - `tests/test_agent_smoke.py` - fast checks that the agent returns legal-looking moves.
+- `references/` - local reference file index; raw uploads are kept ignored.
 
 ## Strategy Notes
 
