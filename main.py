@@ -10,10 +10,8 @@ CENTER = (50.0, 50.0)
 SUN_RADIUS = 10.0
 ROTATION_RADIUS_LIMIT = 50.0
 MAX_SPEED = 6.0
-MIN_ATTACK_SHIPS = 10
-CAPTURE_SAFETY_FACTOR = 1.16
-PARTIAL_NEUTRAL_ALLOWANCE = 1.2
-PARTIAL_ENEMY_ALLOWANCE = 1.3
+MIN_ATTACK_SHIPS = 6
+CAPTURE_SAFETY_FACTOR = 1.1
 PROJECTED_FLEET_TURNS = 55
 MAX_INTERCEPT_TURNS = 80
 
@@ -55,17 +53,19 @@ def _agent_impl(obs: Any) -> List[List[float]]:
     if not my_planets or not targets:
         return []
 
+    step = int(get_field(obs, "step", 0) or 0)
     angular_velocity = float(get_field(obs, "angular_velocity", 0.0))
     comet_ids = set(get_field(obs, "comet_planet_ids", []) or [])
     incoming = build_incoming_map(fleets, planets, obs, angular_velocity, comet_ids)
     planned_by_target: dict[int, int] = {}
     defense_needs = build_defense_needs(my_planets, incoming, player)
-    owned_ratio = len(my_planets) / max(1, len([p for p in planets if p.id not in comet_ids]))
+    my_durable_planets = [p for p in my_planets if p.id not in comet_ids]
+    owned_ratio = len(my_durable_planets) / max(1, len([p for p in planets if p.id not in comet_ids]))
     moves: List[List[float]] = []
 
     # Strong planets should decide first, before smaller worlds spend themselves.
     for source in sorted(my_planets, key=lambda p: (p.ships, p.production), reverse=True):
-        reserve = reserve_for(source) + threatened_reserve(source, incoming, player)
+        reserve = reserve_for(source, step, len(my_durable_planets)) + threatened_reserve(source, incoming, player)
         available = int(source.ships - reserve)
         if available <= 1:
             continue
@@ -98,6 +98,8 @@ def _agent_impl(obs: Any) -> List[List[float]]:
             planned_by_target,
             player,
             owned_ratio,
+            len(my_durable_planets),
+            step,
             available,
         )
         if choice is None:
@@ -124,6 +126,8 @@ def choose_target(
     planned_by_target: dict[int, int],
     player: int,
     owned_ratio: float,
+    my_planet_count: int,
+    step: int,
     available: int,
 ) -> Tuple[Planet, float, int] | None:
     best: Tuple[float, Planet, float, int] | None = None
@@ -136,10 +140,10 @@ def choose_target(
         if needed <= 0:
             continue
 
-        partial_allowance = PARTIAL_NEUTRAL_ALLOWANCE if target.owner == -1 else PARTIAL_ENEMY_ALLOWANCE
-        if needed > max(available, int(available * partial_allowance)):
+        if target.owner != -1 and should_delay_enemy_attack(step, my_planet_count, owned_ratio):
             continue
-        if target.owner != -1 and owned_ratio < 0.35 and needed > int(available * 0.65):
+
+        if needed > available:
             continue
 
         ships = ships_to_send(needed, available)
@@ -175,8 +179,10 @@ def choose_target(
                 continue
             eta = distance / fleet_speed(ships)
             arrival_needed = needed_after_travel(target, needed, eta)
+        if arrival_needed > ships:
+            continue
 
-        score = target_score(target, distance, eta, arrival_needed, comet_ids, owned_ratio)
+        score = target_score(target, distance, eta, arrival_needed, comet_ids, owned_ratio, my_planet_count, step)
         angle = math.atan2(ty - source.y, tx - source.x)
 
         if best is None or score > best[0]:
@@ -196,6 +202,8 @@ def choose_target(
         incoming,
         planned_by_target,
         player,
+        my_planet_count,
+        step,
         available,
     )
 
@@ -226,14 +234,27 @@ def needed_after_travel(target: Planet, needed: int, eta: float) -> int:
 
 def ships_to_send(needed: int, available: int) -> int:
     if needed > available:
-        return max(1, available)
+        return 0
 
     padded = max(needed, int(math.ceil(needed * CAPTURE_SAFETY_FACTOR)), MIN_ATTACK_SHIPS)
     return min(available, padded)
 
 
-def reserve_for(source: Planet) -> int:
-    return max(4, int(8 + source.production * 2))
+def reserve_for(source: Planet, step: int, my_planet_count: int) -> int:
+    if my_planet_count <= 2 or step < 50:
+        return 1
+    if my_planet_count <= 5 or step < 120:
+        return max(1, min(3, source.production))
+
+    return max(2, source.production + 1)
+
+
+def should_delay_enemy_attack(step: int, my_planet_count: int, owned_ratio: float) -> bool:
+    if my_planet_count < 4 and step < 90:
+        return True
+    if owned_ratio < 0.22 and step < 120:
+        return True
+    return False
 
 
 def target_score(
@@ -243,12 +264,17 @@ def target_score(
     needed: int,
     comet_ids: set,
     owned_ratio: float,
+    my_planet_count: int,
+    step: int,
 ) -> float:
-    owner_bonus = 18.0 if target.owner != -1 else 0.0
+    neutral_bonus = 18.0 if target.owner == -1 else 0.0
+    enemy_bonus = 10.0 if target.owner != -1 else 0.0
+    early_economy_bonus = max(0, 5 - my_planet_count) * 8.0 if target.owner == -1 else 0.0
     comet_penalty = 24.0 if target.id in comet_ids else 0.0
-    enemy_timing_penalty = max(0.0, 0.5 - owned_ratio) * 80.0 if target.owner != -1 else 0.0
-    payoff = target.production * 26.0 + target.radius * 2.0 + owner_bonus
-    cost = needed * 0.52 + distance * 0.28 + eta * 0.45 + comet_penalty + enemy_timing_penalty
+    enemy_timing_penalty = max(0.0, 0.45 - owned_ratio) * 90.0 if target.owner != -1 else 0.0
+    late_enemy_bonus = min(20.0, max(0, step - 100) * 0.12) if target.owner != -1 else 0.0
+    payoff = target.production * 34.0 + target.radius * 2.0 + neutral_bonus + enemy_bonus + early_economy_bonus + late_enemy_bonus
+    cost = needed * 0.46 + distance * 0.22 + eta * 0.34 + comet_penalty + enemy_timing_penalty
     return payoff - cost
 
 
@@ -262,10 +288,14 @@ def pressure_weak_enemy(
     incoming: dict[int, dict[int, int]],
     planned_by_target: dict[int, int],
     player: int,
+    my_planet_count: int,
+    step: int,
     available: int,
 ) -> Tuple[Planet, float, int] | None:
     enemies = [p for p in targets if p.owner != -1]
     if not enemies or available < 8:
+        return None
+    if my_planet_count < 5 and step < 110:
         return None
 
     for target in sorted(enemies, key=lambda p: (p.ships, distance_between(source, p))):
