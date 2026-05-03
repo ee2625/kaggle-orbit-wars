@@ -16,10 +16,13 @@ LEADER_PRESSURE_SAFETY_FACTOR = 1.18
 PROJECTED_FLEET_TURNS = 55
 MAX_INTERCEPT_TURNS = 80
 MAX_GAME_TURNS = 500
-REBALANCE_START_STEP = 45
-REBALANCE_REAR_DISTANCE = 36.0
-REBALANCE_FRONTIER_DISTANCE = 30.0
-REBALANCE_MIN_SHIPS = 6
+SIM_HORIZON = 110
+REAR_DISTANCE = 38.0
+FRONTIER_DISTANCE = 26.0
+REINFORCE_MIN_SHIPS = 4
+PARTIAL_SIEGE_MIN_PRODUCTION = 3
+PARTIAL_SIEGE_MIN_SHIPS = 4
+PARTIAL_SIEGE_MAX_ETA = 55.0
 
 _TURN_BY_GAME_PLAYER: dict[tuple[Any, ...], int] = {}
 
@@ -64,16 +67,24 @@ def _agent_impl(obs: Any) -> List[List[float]]:
     if not my_planets or not targets:
         return []
 
-    incoming = build_incoming_map(fleets, planets, obs, angular_velocity, comet_ids)
+    arrival_ledger = build_arrival_ledger(fleets, planets, obs, angular_velocity, comet_ids)
+    incoming = collapse_ledger_to_incoming(arrival_ledger)
+    timelines = {
+        planet.id: simulate_planet_timeline(planet, arrival_ledger.get(planet.id, []), player)
+        for planet in planets
+    }
     planned_by_target: dict[int, int] = {}
     defense_needs = build_defense_needs(my_planets, incoming, player)
     my_durable_planets = [p for p in my_planets if p.id not in comet_ids]
     owned_ratio = len(my_durable_planets) / max(1, len([p for p in planets if p.id not in comet_ids]))
+    weakest_enemy_id = weakest_enemy(planets, fleets, player, comet_ids)
     moves: List[List[float]] = []
 
     # Strong planets should decide first, before smaller worlds spend themselves.
     for source in sorted(my_planets, key=lambda p: (p.ships, p.production), reverse=True):
-        reserve = reserve_for(source, step, len(my_durable_planets)) + threatened_reserve(source, incoming, player)
+        keep_needed = int(timelines[source.id].get("keep_needed", 0))
+        threat_reserve = max(threatened_reserve(source, incoming, player), keep_needed)
+        reserve = reserve_for(source, step, len(my_durable_planets)) + threat_reserve
         available = int(source.ships - reserve)
         if available <= 1:
             continue
@@ -110,6 +121,7 @@ def _agent_impl(obs: Any) -> List[List[float]]:
             len(my_durable_planets),
             step,
             available,
+            weakest_enemy_id,
         )
         if choice is None:
             continue
@@ -125,6 +137,7 @@ def _agent_impl(obs: Any) -> List[List[float]]:
         moves,
         my_planets,
         planets,
+        timelines,
         incoming,
         obs,
         angular_velocity,
@@ -152,11 +165,20 @@ def choose_target(
     my_planet_count: int,
     step: int,
     available: int,
+    weakest_enemy_id: int | None,
 ) -> Tuple[Planet, float, int] | None:
     best: Tuple[float, Planet, float, int] | None = None
     has_affordable_neutral = any(
         is_affordable_neutral(target, player, incoming, planned_by_target, available)
         for target in targets
+    )
+    best_affordable_neutral_production = max(
+        (
+            target.production
+            for target in targets
+            if is_affordable_neutral(target, player, incoming, planned_by_target, available)
+        ),
+        default=0,
     )
     gateway_target_id = opening_gateway_target(
         source,
@@ -223,9 +245,33 @@ def choose_target(
             continue
 
         if needed > available:
+            partial = partial_siege_choice(
+                source,
+                target,
+                all_planets,
+                obs,
+                angular_velocity,
+                comet_ids,
+                incoming_by_owner,
+                planned_by_target,
+                player,
+                owned_ratio,
+                my_planet_count,
+                step,
+                available,
+                needed,
+                best_affordable_neutral_production,
+            )
+            if partial is not None:
+                partial_score, angle, ships = partial
+                if target.id == gateway_target_id:
+                    partial_score += 110.0
+                if best is None or partial_score > best[0]:
+                    best = (partial_score, target, angle, ships)
             continue
 
         safety_factor = LEADER_PRESSURE_SAFETY_FACTOR if leader_pressure else CAPTURE_SAFETY_FACTOR
+        # Cheap probes for unowned/undefended planets; strong bots use 1-3 ship sends.
         min_ships_for_target = 1 if target.owner == -1 and target.ships <= 3 else MIN_ATTACK_SHIPS
         ships = ships_to_send(needed, available, safety_factor, min_ships_for_target)
         if ships <= 0:
@@ -275,6 +321,8 @@ def choose_target(
             score += 110.0
         if leader_pressure:
             score += 150.0
+        if weakest_enemy_id is not None and target.owner == weakest_enemy_id:
+            score += 60.0
 
         if best is None or score > best[0]:
             best = (score, target, angle, ships)
@@ -284,6 +332,77 @@ def choose_target(
         return target, angle, ships
 
     return None
+
+
+def partial_siege_choice(
+    source: Planet,
+    target: Planet,
+    all_planets: Sequence[Planet],
+    obs: Any,
+    angular_velocity: float,
+    comet_ids: set,
+    incoming_by_owner: dict[int, int],
+    planned_by_target: dict[int, int],
+    player: int,
+    owned_ratio: float,
+    my_planet_count: int,
+    step: int,
+    available: int,
+    needed: int,
+    best_affordable_neutral_production: int,
+) -> Tuple[float, float, int] | None:
+    if target.owner != -1 or target.id in comet_ids:
+        return None
+    if target.production < PARTIAL_SIEGE_MIN_PRODUCTION:
+        return None
+    if target.production <= best_affordable_neutral_production:
+        return None
+    if available < PARTIAL_SIEGE_MIN_SHIPS:
+        return None
+    if step < 90 and target.ships > max(34, available + source.production * 8):
+        return None
+
+    friendly_commitment = incoming_by_owner.get(player, 0) + planned_by_target.get(target.id, 0)
+    if friendly_commitment >= target.ships + 1:
+        return None
+
+    opposing_incoming = sum(ships for owner, ships in incoming_by_owner.items() if owner != player)
+    if opposing_incoming > friendly_commitment + available + target.ships:
+        return None
+
+    ships = min(available, max(PARTIAL_SIEGE_MIN_SHIPS, needed - friendly_commitment))
+    if ships <= 0:
+        return None
+
+    aim = aim_target_position(target, source, ships, obs, angular_velocity, comet_ids)
+    if aim is None:
+        return None
+
+    tx, ty = aim
+    distance = math.hypot(tx - source.x, ty - source.y)
+    if distance <= source.radius + target.radius:
+        return None
+    if crosses_sun(source.x, source.y, tx, ty):
+        return None
+    if not path_clear(source, target, tx, ty, all_planets):
+        return None
+
+    eta = distance / fleet_speed(ships)
+    if eta > PARTIAL_SIEGE_MAX_ETA and target.production < 5:
+        return None
+
+    angle = math.atan2(ty - source.y, tx - source.x)
+    if not route_hits_target(source, target, angle, ships, all_planets, obs, angular_velocity, comet_ids, eta):
+        return None
+
+    score = target_score(target, distance, eta, needed, comet_ids, owned_ratio, my_planet_count, step)
+    score += target.production * 14.0
+    score += min(ships, target.ships) * 1.7
+    score -= max(0, needed - available) * 0.55
+    if step < 70:
+        score += target.production * 7.0
+
+    return score, angle, ships
 
 
 def is_affordable_neutral(
@@ -644,6 +763,23 @@ def pressure_leader_owner(
     return None
 
 
+def weakest_enemy(
+    all_planets: Sequence[Planet],
+    fleets: Sequence[Fleet],
+    player: int,
+    comet_ids: set,
+) -> int | None:
+    production = owner_production(all_planets, comet_ids)
+    scores = owner_ship_scores(all_planets, fleets)
+    candidates = [
+        owner for owner in scores
+        if owner != player and owner >= 0 and production.get(owner, 0) > 0
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda owner: scores.get(owner, 0) + production.get(owner, 0) * 12)
+
+
 def owner_production(all_planets: Sequence[Planet], comet_ids: set) -> dict[int, int]:
     production: dict[int, int] = {}
     for planet in all_planets:
@@ -707,13 +843,18 @@ def threatened_reserve(planet: Planet, incoming: dict[int, dict[int, int]], play
     incoming_by_owner = incoming.get(planet.id, {})
     friendly = incoming_by_owner.get(player, 0)
     hostile = sum(ships for owner, ships in incoming_by_owner.items() if owner != player)
-    return max(0, hostile - friendly)
+    if hostile <= 0:
+        return 0
+
+    timing_blind_reserve = int(math.ceil(hostile * (0.70 if planet.production >= 4 else 0.45)))
+    return max(0, hostile - friendly, timing_blind_reserve)
 
 
 def forward_rebalance(
     moves: List[List[float]],
     my_planets: Sequence[Planet],
     all_planets: Sequence[Planet],
+    timelines: dict[int, dict[str, Any]],
     incoming: dict[int, dict[int, int]],
     obs: Any,
     angular_velocity: float,
@@ -722,54 +863,62 @@ def forward_rebalance(
     step: int,
     my_planet_count: int,
 ) -> None:
-    if step < REBALANCE_START_STEP or my_planet_count < 4:
-        return
-
     enemy_planets = [
-        planet for planet in all_planets
-        if planet.owner not in (-1, player) and planet.id not in comet_ids
+        p for p in all_planets
+        if p.owner != player and p.owner != -1 and p.id not in comet_ids
     ]
     if not enemy_planets:
         return
 
-    durable_planets = [planet for planet in my_planets if planet.id not in comet_ids]
-    if len(durable_planets) < 3:
-        return
-
     ships_sent: dict[int, int] = {}
     for move in moves:
-        source_id = int(move[0])
-        ships_sent[source_id] = ships_sent.get(source_id, 0) + int(move[2])
+        from_id = int(move[0])
+        ships = int(move[2])
+        ships_sent[from_id] = ships_sent.get(from_id, 0) + ships
 
-    frontier = [
-        planet for planet in durable_planets
-        if nearest_enemy_distance(planet, enemy_planets) <= REBALANCE_FRONTIER_DISTANCE
+    frontier_friends = [
+        friend for friend in my_planets
+        if min((distance_between(friend, enemy) for enemy in enemy_planets), default=1e9)
+        <= FRONTIER_DISTANCE
     ]
-    if not frontier:
+    if not frontier_friends:
         return
 
-    for source in sorted(durable_planets, key=lambda planet: planet.ships, reverse=True):
-        source_enemy_distance = nearest_enemy_distance(source, enemy_planets)
-        if source_enemy_distance < REBALANCE_REAR_DISTANCE:
+    for source in sorted(my_planets, key=lambda p: -p.ships):
+        nearest_enemy_distance = min(
+            (distance_between(source, enemy) for enemy in enemy_planets),
+            default=1e9,
+        )
+        if nearest_enemy_distance < REAR_DISTANCE:
             continue
 
-        sent = ships_sent.get(source.id, 0)
-        incoming_by_owner = incoming.get(source.id, {})
-        hostile = sum(ships for owner, ships in incoming_by_owner.items() if owner != player)
-        reserve = reserve_for(source, step, my_planet_count) + hostile + source.production * 5
-        available = int(source.ships - sent - reserve)
-        if available < REBALANCE_MIN_SHIPS:
+        keep_needed = int(timelines.get(source.id, {}).get("keep_needed", 0))
+        threat_reserve = max(threatened_reserve(source, incoming, player), keep_needed)
+        reserve_floor = reserve_for(source, step, my_planet_count)
+        # Safety buffer so we keep ammunition for surprise enemy launches.
+        safety_buffer = source.production * 6
+        reserve = reserve_floor + threat_reserve + safety_buffer
+        sent_already = ships_sent.get(source.id, 0)
+        available = int(source.ships - sent_already - reserve)
+        if available < REINFORCE_MIN_SHIPS:
             continue
 
-        target = choose_rebalance_target(source, frontier, enemy_planets)
+        # Rate cap: never ship more than 50% of total ships in one turn.
+        send_cap = max(REINFORCE_MIN_SHIPS, int(source.ships * 0.5))
+        ships_to_send = min(available, send_cap)
+        if ships_to_send < REINFORCE_MIN_SHIPS:
+            continue
+
+        target = best_reinforcement_target(
+            source,
+            frontier_friends,
+            enemy_planets,
+            timelines,
+        )
         if target is None:
             continue
 
-        ships = min(available, max(REBALANCE_MIN_SHIPS, int(source.ships * 0.4)))
-        if ships < REBALANCE_MIN_SHIPS:
-            continue
-
-        aim = aim_target_position(target, source, ships, obs, angular_velocity, comet_ids)
+        aim = aim_target_position(target, source, ships_to_send, obs, angular_velocity, comet_ids)
         if aim is None:
             continue
         tx, ty = aim
@@ -778,49 +927,46 @@ def forward_rebalance(
         if not path_clear(source, target, tx, ty, all_planets):
             continue
 
-        distance = math.hypot(tx - source.x, ty - source.y)
         angle = math.atan2(ty - source.y, tx - source.x)
-        eta = distance / fleet_speed(ships)
-        if not route_hits_target(source, target, angle, ships, all_planets, obs, angular_velocity, comet_ids, eta):
+        eta = math.hypot(tx - source.x, ty - source.y) / fleet_speed(ships_to_send)
+        if not route_hits_target(
+            source, target, angle, ships_to_send, all_planets,
+            obs, angular_velocity, comet_ids, eta,
+        ):
             continue
 
-        moves.append([source.id, angle, ships])
-        ships_sent[source.id] = sent + ships
+        moves.append([source.id, angle, ships_to_send])
+        ships_sent[source.id] = sent_already + ships_to_send
 
 
-def choose_rebalance_target(
+def best_reinforcement_target(
     source: Planet,
-    frontier: Sequence[Planet],
+    frontier_friends: Sequence[Planet],
     enemy_planets: Sequence[Planet],
+    timelines: dict[int, dict[str, Any]],
 ) -> Planet | None:
     best: Tuple[float, Planet] | None = None
-    source_enemy_distance = nearest_enemy_distance(source, enemy_planets)
-    for target in frontier:
-        if target.id == source.id:
+    for friend in frontier_friends:
+        if friend.id == source.id:
             continue
-        target_enemy_distance = nearest_enemy_distance(target, enemy_planets)
-        if target_enemy_distance >= source_enemy_distance - 8.0:
+        d_to_source = distance_between(source, friend)
+        if d_to_source < 6.0:
             continue
-
-        distance = distance_between(source, target)
-        if distance < 7.0:
-            continue
-
-        low_garrison_bonus = max(0, target.production * 6 - target.ships)
+        nearest_enemy_distance = min(
+            distance_between(friend, enemy) for enemy in enemy_planets
+        )
+        timeline = timelines.get(friend.id, {})
+        min_owned = int(timeline.get("min_owned", friend.ships))
+        vulnerability = max(0, friend.production * 5 - min_owned)
         score = (
-            target.production * 8.0
-            + low_garrison_bonus * 1.2
-            + (source_enemy_distance - target_enemy_distance) * 0.5
-            - distance * 0.22
+            friend.production * 6.0
+            + vulnerability * 1.5
+            - nearest_enemy_distance * 0.4
+            - d_to_source * 0.25
         )
         if best is None or score > best[0]:
-            best = (score, target)
-
+            best = (score, friend)
     return None if best is None else best[1]
-
-
-def nearest_enemy_distance(source: Planet, enemy_planets: Sequence[Planet]) -> float:
-    return min((distance_between(source, enemy) for enemy in enemy_planets), default=1e9)
 
 
 def choose_defense_target(
@@ -1018,6 +1164,18 @@ def projected_fleet_target(
     comet_ids: set,
     max_turns: int = PROJECTED_FLEET_TURNS,
 ) -> Planet | None:
+    hit = _projected_fleet_hit(fleet, planets, obs, angular_velocity, comet_ids, max_turns)
+    return hit[0] if hit is not None else None
+
+
+def _projected_fleet_hit(
+    fleet: Fleet,
+    planets: Sequence[Planet],
+    obs: Any,
+    angular_velocity: float,
+    comet_ids: set,
+    max_turns: int = PROJECTED_FLEET_TURNS,
+) -> Tuple[Planet, float] | None:
     speed = fleet_speed(fleet.ships)
     dx = math.cos(fleet.angle) * speed
     dy = math.sin(fleet.angle) * speed
@@ -1047,7 +1205,8 @@ def projected_fleet_target(
                 hits.append((turn + 0.95, planet))
 
         if hits:
-            return min(hits, key=lambda item: item[0])[1]
+            best = min(hits, key=lambda item: item[0])
+            return best[1], best[0]
 
         if nx < 0.0 or nx > BOARD_SIZE or ny < 0.0 or ny > BOARD_SIZE:
             return None
@@ -1055,6 +1214,173 @@ def projected_fleet_target(
         x, y = nx, ny
 
     return None
+
+
+def collapse_ledger_to_incoming(
+    arrival_ledger: dict[int, list[Tuple[int, int, int]]],
+) -> dict[int, dict[int, int]]:
+    incoming: dict[int, dict[int, int]] = {}
+    for planet_id, events in arrival_ledger.items():
+        if not events:
+            continue
+        by_owner: dict[int, int] = {}
+        for _, owner, ships in events:
+            by_owner[owner] = by_owner.get(owner, 0) + int(ships)
+        incoming[planet_id] = by_owner
+    return incoming
+
+
+def build_arrival_ledger(
+    fleets: Sequence[Fleet],
+    planets: Sequence[Planet],
+    obs: Any,
+    angular_velocity: float,
+    comet_ids: set,
+    horizon: int = SIM_HORIZON,
+) -> dict[int, list[Tuple[int, int, int]]]:
+    arrivals: dict[int, list[Tuple[int, int, int]]] = {planet.id: [] for planet in planets}
+    for fleet in fleets:
+        hit = _projected_fleet_hit(fleet, planets, obs, angular_velocity, comet_ids, max_turns=horizon)
+        if hit is None:
+            continue
+        target, eta_turns = hit
+        eta = max(1, int(math.ceil(eta_turns)))
+        if eta > horizon:
+            continue
+        arrivals[target.id].append((eta, int(fleet.owner), int(fleet.ships)))
+    return arrivals
+
+
+def resolve_arrival_event(
+    owner: int,
+    garrison: float,
+    arrivals: list[Tuple[int, int, int]],
+) -> Tuple[int, float]:
+    by_owner: dict[int, int] = {}
+    for _, attacker_owner, ships in arrivals:
+        by_owner[attacker_owner] = by_owner.get(attacker_owner, 0) + int(ships)
+
+    if not by_owner:
+        return owner, max(0.0, garrison)
+
+    sorted_players = sorted(by_owner.items(), key=lambda item: item[1], reverse=True)
+    top_owner, top_ships = sorted_players[0]
+
+    if len(sorted_players) > 1:
+        second_ships = sorted_players[1][1]
+        if top_ships == second_ships:
+            survivor_owner = -1
+            survivor_ships = 0
+        else:
+            survivor_owner = top_owner
+            survivor_ships = top_ships - second_ships
+    else:
+        survivor_owner = top_owner
+        survivor_ships = top_ships
+
+    if survivor_ships <= 0:
+        return owner, max(0.0, garrison)
+
+    if owner == survivor_owner:
+        return owner, garrison + survivor_ships
+
+    garrison -= survivor_ships
+    if garrison < 0:
+        return survivor_owner, -garrison
+    return owner, garrison
+
+
+def simulate_planet_timeline(
+    planet: Planet,
+    arrivals: list[Tuple[int, int, int]],
+    player: int,
+    horizon: int = SIM_HORIZON,
+) -> dict[str, Any]:
+    horizon = max(0, int(horizon))
+    by_turn: dict[int, list[Tuple[int, int, int]]] = {}
+    for event in arrivals:
+        eta, owner, ships = event
+        if ships <= 0 or eta < 1 or eta > horizon:
+            continue
+        by_turn.setdefault(eta, []).append((eta, owner, int(ships)))
+
+    owner = int(planet.owner)
+    garrison = float(planet.ships)
+    owner_at: dict[int, int] = {0: owner}
+    ships_at: dict[int, float] = {0: max(0.0, garrison)}
+    min_owned = garrison if owner == player else 0.0
+    first_enemy: int | None = None
+    fall_turn: int | None = None
+
+    for turn in range(1, horizon + 1):
+        if owner != -1:
+            garrison += planet.production
+
+        group = by_turn.get(turn, [])
+        if group:
+            prev_owner = owner
+            if prev_owner == player and first_enemy is None:
+                if any(item[1] not in (-1, player) for item in group):
+                    first_enemy = turn
+            owner, garrison = resolve_arrival_event(owner, garrison, group)
+            if prev_owner == player and owner != player and fall_turn is None:
+                fall_turn = turn
+
+        owner_at[turn] = owner
+        ships_at[turn] = max(0.0, garrison)
+        if owner == player:
+            min_owned = min(min_owned, garrison)
+
+    keep_needed = 0
+    holds_full = True
+    if planet.owner == player:
+        def survives_with_keep(keep: int) -> bool:
+            sim_owner = int(planet.owner)
+            sim_garrison = float(keep)
+            for sim_turn in range(1, horizon + 1):
+                if sim_owner != -1:
+                    sim_garrison += planet.production
+                sim_group = by_turn.get(sim_turn, [])
+                if sim_group:
+                    sim_owner, sim_garrison = resolve_arrival_event(sim_owner, sim_garrison, sim_group)
+                    if sim_owner != player:
+                        return False
+            return sim_owner == player
+
+        if survives_with_keep(int(planet.ships)):
+            lo, hi = 0, int(planet.ships)
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if survives_with_keep(mid):
+                    hi = mid
+                else:
+                    lo = mid + 1
+            keep_needed = lo
+        else:
+            holds_full = False
+            keep_needed = int(planet.ships)
+
+    return {
+        "owner_at": owner_at,
+        "ships_at": ships_at,
+        "keep_needed": keep_needed,
+        "min_owned": max(0, int(math.floor(min_owned))) if planet.owner == player else 0,
+        "first_enemy": first_enemy,
+        "fall_turn": fall_turn,
+        "holds_full": holds_full,
+        "horizon": horizon,
+    }
+
+
+def state_at_timeline(timeline: dict[str, Any], arrival_turn: float) -> Tuple[int, float]:
+    horizon = int(timeline["horizon"])
+    turn = max(0, int(math.ceil(arrival_turn)))
+    turn = min(turn, horizon)
+    owner_at = timeline["owner_at"]
+    ships_at = timeline["ships_at"]
+    owner = owner_at.get(turn, owner_at[horizon])
+    ships = ships_at.get(turn, ships_at[horizon])
+    return int(owner), max(0.0, float(ships))
 
 
 def route_hits_target(
