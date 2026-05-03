@@ -10,7 +10,9 @@ from main import (
     projected_fleet_target,
     route_hits_target,
     should_save_for_high_value_opening,
+    should_save_for_low_production_breakout,
     should_save_for_leader_strike,
+    should_siege_remaining_enemy,
     should_prioritize_leader_pressure_over_rebalance,
 )
 
@@ -301,6 +303,51 @@ class AgentSmokeTest(unittest.TestCase):
                 4,
             )
         )
+
+    def test_low_production_opening_saves_for_breakout_target(self):
+        source = Planet(0, 0, 90.0, 90.0, 1.0, 7, 1)
+        first_low = Planet(1, -1, 90.0, 82.0, 1.0, 7, 1)
+        second_low = Planet(2, -1, 80.0, 82.0, 1.0, 7, 1)
+        breakout = Planet(3, -1, 70.0, 90.0, 2.0, 16, 3)
+        planets = [source, first_low, second_low, breakout]
+        obs = {
+            "player": 0,
+            "step": 12,
+            "angular_velocity": 0.0,
+            "comet_planet_ids": [],
+            "comets": [],
+            "planets": [[p.id, p.owner, p.x, p.y, p.radius, p.ships, p.production] for p in planets],
+        }
+
+        self.assertTrue(
+            should_save_for_low_production_breakout(
+                source,
+                second_low,
+                [first_low, second_low, breakout],
+                planets,
+                obs,
+                0.0,
+                set(),
+                0,
+                {first_low.id: {0: 8}},
+                {},
+                6,
+                12,
+                2,
+            )
+        )
+
+    def test_sieges_remaining_enemy_when_far_ahead(self):
+        my_planets = [
+            Planet(0, 0, 10.0, 10.0, 2.0, 220, 8),
+            Planet(1, 0, 20.0, 10.0, 2.0, 180, 8),
+        ]
+        enemy_planets = [
+            Planet(2, 1, 80.0, 80.0, 2.0, 150, 3),
+            Planet(3, 1, 75.0, 75.0, 2.0, 120, 2),
+        ]
+
+        self.assertTrue(should_siege_remaining_enemy(enemy_planets, my_planets + enemy_planets, [], set(), 0))
 
 
 if __name__ == "__main__":
