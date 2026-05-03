@@ -1,7 +1,16 @@
 import math
 import unittest
 
-from main import Fleet, Planet, agent, projected_fleet_target
+from main import (
+    Fleet,
+    Planet,
+    agent,
+    current_step,
+    path_clear,
+    projected_fleet_target,
+    route_hits_target,
+    should_save_for_leader_strike,
+)
 
 
 class AgentSmokeTest(unittest.TestCase):
@@ -114,6 +123,86 @@ class AgentSmokeTest(unittest.TestCase):
 
         self.assertIsNotNone(target)
         self.assertEqual(target.id, 14)
+
+    def test_infers_step_when_observation_omits_step(self):
+        angular_velocity = 0.04
+        turn = 23
+        orbital_radius = 30.0
+        x = 50.0 + math.cos(angular_velocity * turn) * orbital_radius
+        y = 50.0 + math.sin(angular_velocity * turn) * orbital_radius
+        obs = {
+            "player": 2,
+            "angular_velocity": angular_velocity,
+            "initial_planets": [
+                [7, -1, 80.0, 50.0, 1.0, 12, 3],
+            ],
+            "planets": [
+                [7, -1, x, y, 1.0, 12, 3],
+            ],
+            "fleets": [],
+            "comet_planet_ids": [],
+        }
+
+        planets = [Planet(*planet) for planet in obs["planets"]]
+
+        self.assertEqual(current_step(obs, planets, [], 2, angular_velocity, set()), turn)
+
+    def test_route_validation_catches_moving_blocker(self):
+        source = Planet(1, 0, 1.0, 50.0, 1.0, 1000, 1)
+        target = Planet(2, -1, 99.0, 50.0, 1.0, 10, 1)
+        blocker = Planet(
+            3,
+            -1,
+            50.0 + math.cos(-1.0) * 20.0,
+            50.0 + math.sin(-1.0) * 20.0,
+            1.0,
+            10,
+            1,
+        )
+        planets = [source, target, blocker]
+        obs = {
+            "player": 0,
+            "angular_velocity": 0.1,
+            "comet_planet_ids": [],
+            "comets": [],
+            "planets": [[p.id, p.owner, p.x, p.y, p.radius, p.ships, p.production] for p in planets],
+        }
+
+        self.assertTrue(path_clear(source, target, target.x, target.y, planets))
+        self.assertFalse(route_hits_target(source, target, 0.0, 1000, planets, obs, 0.1, set(), 17.0))
+
+    def test_saves_low_value_spend_for_leader_strike(self):
+        source = Planet(1, 0, 10.0, 10.0, 2.0, 50, 5)
+        low_value = Planet(2, -1, 10.0, 25.0, 1.0, 5, 1)
+        leader_anchor = Planet(3, 1, 80.0, 10.0, 2.0, 45, 5)
+        planets = [source, low_value, leader_anchor]
+        obs = {
+            "player": 0,
+            "step": 100,
+            "angular_velocity": 0.0,
+            "comet_planet_ids": [],
+            "comets": [],
+            "planets": [[p.id, p.owner, p.x, p.y, p.radius, p.ships, p.production] for p in planets],
+        }
+        leader_fleet = Fleet(99, 1, 70.0, 80.0, 0.0, 3, 100)
+
+        self.assertTrue(
+            should_save_for_leader_strike(
+                source,
+                low_value,
+                [low_value, leader_anchor],
+                planets,
+                obs,
+                0.0,
+                set(),
+                0,
+                {},
+                {},
+                [leader_fleet],
+                35,
+                100,
+            )
+        )
 
 
 if __name__ == "__main__":

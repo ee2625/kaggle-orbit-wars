@@ -28,12 +28,14 @@ kaggle competitions submit orbit-wars -f main.py -m "baseline v1"
 ## Repo Layout
 
 - `main.py` - Kaggle submission entrypoint with `agent(obs)`.
+- `submissions/` - stable snapshots of submitted/candidate agents for rollback and comparisons.
 - `scripts/run_local.py` - local match runner against Kaggle's built-in agents.
 - `scripts/backtest.py` - repeatable batch backtester with summaries and JSON/CSV output.
 - `scripts/league_backtest.py` - local ladder simulator with Kaggle-style Gaussian skill ratings.
 - `scripts/analyze_replay.py` - replay diagnostics for expansion timing, launches, and fleet losses.
 - `scripts/collect_feedback.py` - Kaggle episode collector that downloads new replays/logs and writes a feedback summary.
 - `scripts/evaluate_replay_suite.py` - counterfactual replay suite that tests `main.py` on collected maps against recorded opponent actions.
+- `scripts/weighted_replay_score.py` - weights replay-suite results toward newer submissions and recent ladder feedback.
 - `tests/test_agent_smoke.py` - fast checks that the agent returns legal-looking moves.
 - `docs/rules_checklist.md` - practical compliance notes from the competition rules.
 - `references/` - local reference file index; raw uploads are kept ignored.
@@ -112,6 +114,13 @@ Run the current bot against collected replay maps with recorded opponent actions
   --agent main.py \
   --team orf527 \
   --json backtests/kaggle_feedback/replay_suite_main.json
+```
+
+Score that replay suite with extra weight on newer submissions:
+
+```bash
+.venv/bin/python scripts/weighted_replay_score.py \
+  backtests/kaggle_feedback/replay_suite_main.json
 ```
 
 ## Strategy Notes
