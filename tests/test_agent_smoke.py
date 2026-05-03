@@ -211,6 +211,12 @@ class AgentSmokeTest(unittest.TestCase):
             "angular_velocity": 0.0,
             "comet_planet_ids": [],
             "comets": [],
+            "initial_planets": [
+                [0, 0, 15.0, 85.0, 2.0, 10, 5],
+                [4, 1, 82.0, 80.0, 2.0, 10, 5],
+                [5, 2, 85.0, 15.0, 2.0, 10, 5],
+                [6, 3, 15.0, 15.0, 2.0, 10, 5],
+            ],
             "planets": [
                 [0, 0, 15.0, 85.0, 2.0, 90, 5],
                 [1, 0, 70.0, 80.0, 2.0, 12, 4],
@@ -224,6 +230,31 @@ class AgentSmokeTest(unittest.TestCase):
         moves = agent(obs)
 
         self.assertTrue(any(move[0] == 0 and move[2] >= 6 for move in moves))
+
+    def test_skips_forward_rebalance_in_two_player_games(self):
+        obs = {
+            "player": 0,
+            "step": 80,
+            "angular_velocity": 0.0,
+            "comet_planet_ids": [],
+            "comets": [],
+            "initial_planets": [
+                [0, 0, 15.0, 85.0, 2.0, 10, 5],
+                [4, 1, 82.0, 80.0, 2.0, 10, 5],
+            ],
+            "planets": [
+                [0, 0, 15.0, 85.0, 2.0, 90, 5],
+                [1, 0, 70.0, 80.0, 2.0, 12, 4],
+                [2, 0, 15.0, 95.0, 2.0, 20, 2],
+                [3, 0, 5.0, 80.0, 2.0, 20, 2],
+                [4, 1, 82.0, 80.0, 2.0, 200, 5],
+            ],
+            "fleets": [],
+        }
+
+        moves = agent(obs)
+
+        self.assertFalse(any(move[0] == 0 and move[2] >= 6 for move in moves))
 
 
 if __name__ == "__main__":
