@@ -15,12 +15,17 @@ from scripts.collect_feedback import download_replay, load_kaggle_api  # noqa: E
 
 
 EPISODE_RE = re.compile(r"(?<!\d)(\d{6,})(?!\d)")
+NON_EPISODE_QUERY_KEYS = ("submissionId=", "teamId=")
 
 
 def ids_from_text(text: str) -> list[int]:
     seen: set[int] = set()
     ids: list[int] = []
     for match in EPISODE_RE.finditer(text):
+        prefix = text[max(0, match.start() - 20):match.start()]
+        if any(prefix.endswith(key) for key in NON_EPISODE_QUERY_KEYS):
+            continue
+
         episode_id = int(match.group(1))
         if episode_id in seen:
             continue
