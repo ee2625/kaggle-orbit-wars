@@ -9,7 +9,9 @@ from main import (
     path_clear,
     projected_fleet_target,
     route_hits_target,
+    should_save_for_high_value_opening,
     should_save_for_leader_strike,
+    should_prioritize_leader_pressure_over_rebalance,
 )
 
 
@@ -255,6 +257,50 @@ class AgentSmokeTest(unittest.TestCase):
         moves = agent(obs)
 
         self.assertFalse(any(move[0] == 0 and move[2] >= 6 for move in moves))
+
+    def test_prioritizes_leader_pressure_over_rebalance_when_behind(self):
+        planets = [
+            Planet(0, 0, 15.0, 85.0, 2.0, 90, 4),
+            Planet(1, 0, 70.0, 80.0, 2.0, 12, 3),
+            Planet(2, 1, 82.0, 80.0, 2.0, 200, 5),
+            Planet(3, 1, 75.0, 70.0, 2.0, 200, 5),
+            Planet(4, 2, 15.0, 15.0, 2.0, 10, 1),
+            Planet(5, 3, 85.0, 15.0, 2.0, 10, 1),
+        ]
+
+        self.assertTrue(should_prioritize_leader_pressure_over_rebalance(planets, set(), 0, 90))
+
+    def test_four_player_rich_opening_does_not_wait_on_close_prod_two(self):
+        source = Planet(5, 0, 35.0, 96.0, 2.6, 15, 5)
+        close = Planet(25, -1, 40.0, 86.0, 2.1, 9, 2)
+        high_value = Planet(1, -1, 45.0, 75.0, 2.6, 20, 5)
+        obs = {
+            "player": 0,
+            "step": 1,
+            "angular_velocity": 0.0,
+            "comet_planet_ids": [],
+            "comets": [],
+            "planets": [[p.id, p.owner, p.x, p.y, p.radius, p.ships, p.production] for p in [source, close, high_value]],
+        }
+
+        self.assertFalse(
+            should_save_for_high_value_opening(
+                source,
+                close,
+                [close, high_value],
+                [source, close, high_value],
+                obs,
+                0.0,
+                set(),
+                0,
+                {},
+                {},
+                14,
+                1,
+                1,
+                4,
+            )
+        )
 
 
 if __name__ == "__main__":
