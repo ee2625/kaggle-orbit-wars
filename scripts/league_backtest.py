@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import csv
 import itertools
 import json
 import math
+import os
 import random
 import statistics
 import sys
@@ -19,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from scripts.backtest import final_scores, load_make, quiet_output
+from scripts.fast_run_local import run_episode as run_fast_episode
 
 
 VALID_PLAYER_COUNTS = {2, 4}
@@ -181,7 +184,12 @@ def build_competitors(agent_specs: list[str]) -> list[Competitor]:
 
     for spec in agent_specs:
         path = Path(spec)
-        base = path.name if path.suffix else spec
+        if path.suffix and path.name in {"main.py", "agent.py"} and path.parent.name:
+            base = path.parent.name
+        elif path.suffix:
+            base = path.stem
+        else:
+            base = spec
         count = seen.get(base, 0) + 1
         seen[base] = count
         label = base if count == 1 else f"{base}#{count}"
@@ -240,14 +248,28 @@ def adjusted_scores(scores: list[int], statuses: list[str]) -> list[int]:
 
 
 def run_league_episode(
-    make: Callable[..., Any],
+    make: Callable[..., Any] | None,
     lineup: list[Competitor],
     episode: int,
     seed: int,
     episode_steps: int | None,
     debug: bool,
     verbose_env: bool,
+    backend: str = "kaggle",
+    fast_act_timeout: float = 0.08,
 ) -> tuple[list[int], list[float | int | None], list[str], float, int]:
+    if backend == "fast":
+        _, rewards, scores, statuses, duration_s, steps = run_fast_episode(
+            [competitor.spec for competitor in lineup],
+            seed=seed,
+            episode_steps=episode_steps or 500,
+            act_timeout=fast_act_timeout,
+        )
+        return adjusted_scores(scores, statuses), rewards, statuses, duration_s, steps
+
+    if make is None:
+        raise ValueError("kaggle backend requires a make callable")
+
     configuration: dict[str, Any] = {"seed": seed}
     if episode_steps is not None:
         configuration["episodeSteps"] = episode_steps
@@ -266,8 +288,139 @@ def run_league_episode(
     return adjusted_scores(scores, statuses), rewards, statuses, duration_s, len(env.steps)
 
 
+def run_league_episode_worker(
+    payload: tuple[list[Competitor], int, int, int | None, bool, bool, str, float],
+) -> tuple[int, list[int], list[float | int | None], list[str], float, int]:
+    lineup, episode, seed, episode_steps, debug, verbose_env, backend, fast_act_timeout = payload
+    make = None if backend == "fast" else load_make(verbose_env)
+    scores, rewards, statuses, duration_s, steps = run_league_episode(
+        make=make,
+        lineup=lineup,
+        episode=episode,
+        seed=seed,
+        episode_steps=episode_steps,
+        debug=debug,
+        verbose_env=verbose_env,
+        backend=backend,
+        fast_act_timeout=fast_act_timeout,
+    )
+    return episode, scores, rewards, statuses, duration_s, steps
+
+
+def preplanned_lineups(
+    competitors: list[Competitor],
+    games: int,
+    players: int,
+    seed_start: int,
+    schedule: str,
+) -> list[list[Competitor]]:
+    if schedule == "ladder":
+        raise ValueError("ladder schedule depends on live ratings and cannot be safely preplanned.")
+
+    rng = random.Random(seed_start)
+    matchups = build_matchups(competitors, players)
+    ratings = {competitor.label: Rating() for competitor in competitors}
+    lineups: list[list[Competitor]] = []
+    for episode in range(games):
+        matchup = choose_matchup(competitors, matchups, ratings, episode, players, schedule, rng)
+        lineups.append(rotate_lineup(matchup, episode))
+    return lineups
+
+
+def run_preplanned_league(
+    competitors: list[Competitor],
+    lineups: list[list[Competitor]],
+    games: int,
+    seed_start: int,
+    mu0: float,
+    sigma0: float,
+    beta: float,
+    tau: float,
+    episode_steps: int | None,
+    debug: bool,
+    verbose_env: bool,
+    quiet: bool,
+    jobs: int,
+    backend: str,
+    fast_act_timeout: float,
+) -> tuple[dict[str, Rating], dict[str, CompetitorStats], list[LeagueEpisode]]:
+    ratings = {competitor.label: Rating(mu0, sigma0) for competitor in competitors}
+    stats = {competitor.label: CompetitorStats() for competitor in competitors}
+    episodes_by_number: dict[int, tuple[list[int], list[float | int | None], list[str], float, int]] = {}
+
+    payloads = [
+        (
+            lineups[episode],
+            episode + 1,
+            seed_start + episode,
+            episode_steps,
+            debug,
+            verbose_env,
+            backend,
+            fast_act_timeout,
+        )
+        for episode in range(games)
+    ]
+
+    if jobs <= 1:
+        make = None if backend == "fast" else load_make(verbose_env)
+        for lineup, episode, seed, episode_steps, debug, verbose_env, backend, fast_act_timeout in payloads:
+            episodes_by_number[episode] = run_league_episode(
+                make=make,
+                lineup=lineup,
+                episode=episode,
+                seed=seed,
+                episode_steps=episode_steps,
+                debug=debug,
+                verbose_env=verbose_env,
+                backend=backend,
+                fast_act_timeout=fast_act_timeout,
+            )
+    else:
+        with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as pool:
+            futures = [pool.submit(run_league_episode_worker, payload) for payload in payloads]
+            for future in concurrent.futures.as_completed(futures):
+                episode, scores, rewards, statuses, duration_s, steps = future.result()
+                episodes_by_number[episode] = (scores, rewards, statuses, duration_s, steps)
+
+    episodes: list[LeagueEpisode] = []
+    for episode in range(1, games + 1):
+        lineup = lineups[episode - 1]
+        labels = [competitor.label for competitor in lineup]
+        seed = seed_start + episode - 1
+        before = rating_snapshot(labels, ratings)
+        scores, rewards, statuses, duration_s, steps = episodes_by_number[episode]
+        update_pairwise_ratings(labels, scores, ratings, beta, tau)
+        classify_outcomes(labels, scores, statuses, stats)
+        after = rating_snapshot(labels, ratings)
+        row = LeagueEpisode(
+            episode=episode,
+            seed=seed,
+            lineup=labels,
+            specs=[competitor.spec for competitor in lineup],
+            scores=scores,
+            ranks=rank_scores(scores),
+            rewards=rewards,
+            statuses=statuses,
+            ratings_before=before,
+            ratings_after=after,
+            duration_s=duration_s,
+            steps=steps,
+        )
+        episodes.append(row)
+
+        if not quiet:
+            print(
+                f"episode={row.episode} seed={seed} lineup={','.join(labels)} "
+                f"scores={scores} ranks={row.ranks} statuses={statuses} "
+                f"duration={duration_s:.2f}s"
+            )
+
+    return ratings, stats, episodes
+
+
 def run_league(
-    make: Callable[..., Any],
+    make: Callable[..., Any] | None,
     competitors: list[Competitor],
     games: int,
     players: int,
@@ -281,7 +434,29 @@ def run_league(
     debug: bool,
     verbose_env: bool,
     quiet: bool,
+    jobs: int = 1,
+    backend: str = "kaggle",
+    fast_act_timeout: float = 0.08,
 ) -> tuple[dict[str, Rating], dict[str, CompetitorStats], list[LeagueEpisode]]:
+    if jobs > 1 and schedule != "ladder":
+        return run_preplanned_league(
+            competitors=competitors,
+            lineups=preplanned_lineups(competitors, games, players, seed_start, schedule),
+            games=games,
+            seed_start=seed_start,
+            mu0=mu0,
+            sigma0=sigma0,
+            beta=beta,
+            tau=tau,
+            episode_steps=episode_steps,
+            debug=debug,
+            verbose_env=verbose_env,
+            quiet=quiet,
+            jobs=jobs,
+            backend=backend,
+            fast_act_timeout=fast_act_timeout,
+        )
+
     rng = random.Random(seed_start)
     matchups = build_matchups(competitors, players)
     ratings = {competitor.label: Rating(mu0, sigma0) for competitor in competitors}
@@ -302,6 +477,8 @@ def run_league(
             episode_steps=episode_steps,
             debug=debug,
             verbose_env=verbose_env,
+            backend=backend,
+            fast_act_timeout=fast_act_timeout,
         )
 
         update_pairwise_ratings(labels, scores, ratings, beta, tau)
@@ -434,8 +611,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--beta", type=float, default=100.0, help="Performance variance scale.")
     parser.add_argument("--tau", type=float, default=0.0, help="Uncertainty drift added before each pair update.")
     parser.add_argument("--episode-steps", type=int, help="Override episodeSteps for faster smoke runs.")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="Parallel worker processes for round-robin/random schedules. Ladder schedule remains serial.",
+    )
     parser.add_argument("--debug", action="store_true", help="Run the Kaggle environment in debug mode.")
     parser.add_argument("--verbose-env", action="store_true", help="Do not suppress Kaggle environment stdout/stderr.")
+    parser.add_argument(
+        "--backend",
+        choices=["kaggle", "fast"],
+        default="kaggle",
+        help="Simulation backend. 'fast' bypasses the Kaggle wrapper with orbit_fast.",
+    )
+    parser.add_argument(
+        "--fast-act-timeout",
+        type=float,
+        default=0.08,
+        help="Synthetic actTimeout passed to agents when --backend fast is used.",
+    )
     parser.add_argument("--quiet", action="store_true", help="Print only the final leaderboard.")
     parser.add_argument("--out-dir", type=Path, help="Write timestamped JSON and CSV results into this directory.")
     parser.add_argument("--json", type=Path, help="Write JSON results to this path.")
@@ -447,6 +642,9 @@ def main() -> int:
     args = parse_args()
     agent_specs = args.agent or ["main.py", "random"]
     competitors = build_competitors(agent_specs)
+    jobs = max(1, min(args.jobs, os.cpu_count() or 1))
+    if args.jobs > 1 and args.schedule == "ladder":
+        print("league_backtest: --jobs is ignored for ladder schedule because matchmaking depends on live ratings.", file=sys.stderr)
 
     try:
         build_matchups(competitors, args.players)
@@ -455,7 +653,7 @@ def main() -> int:
         return 2
 
     try:
-        make = load_make(args.verbose_env)
+        make = None if args.backend == "fast" else load_make(args.verbose_env)
     except ImportError:
         print("Missing dependency. Run: pip install -r requirements.txt", file=sys.stderr)
         return 1
@@ -475,6 +673,9 @@ def main() -> int:
         debug=args.debug,
         verbose_env=args.verbose_env,
         quiet=args.quiet,
+        jobs=jobs,
+        backend=args.backend,
+        fast_act_timeout=args.fast_act_timeout,
     )
     rows = leaderboard_rows(ratings, stats)
     print_leaderboard(rows)
@@ -488,6 +689,9 @@ def main() -> int:
         "players": args.players,
         "seed_start": args.seed,
         "schedule": args.schedule,
+        "jobs": jobs,
+        "backend": args.backend,
+        "fast_act_timeout": args.fast_act_timeout,
         "rating_model": {
             "type": "pairwise_trueskill_style",
             "mu0": args.mu0,

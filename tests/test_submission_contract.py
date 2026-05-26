@@ -5,7 +5,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 MAIN = ROOT / "main.py"
-ALLOWED_MAIN_IMPORTS = {"__future__", "dataclasses", "math", "typing"}
+ALLOWED_MAIN_IMPORTS = {"collections", "dataclasses", "math", "time"}
 FORBIDDEN_NAMES = {
     "http",
     "httpx",
@@ -18,7 +18,6 @@ FORBIDDEN_NAMES = {
     "requests",
     "socket",
     "subprocess",
-    "time",
     "urllib",
 }
 

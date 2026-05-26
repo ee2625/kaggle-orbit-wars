@@ -28,3 +28,15 @@ getting-started.log
 orbit-wars-agent-ow-proto.ipynb
 orbit-wars.zip
 orbit-wars/
+
+# Third-party / external agent code (not ours to redistribute).
+references/external_agents/
+references/top10_*/
+
+# Private agent / runtime context — never commit.
+.claude/
+CLAUDE.md
+
+# Local-only experimental directories.
+candidate_builds/
+orbit_fast/

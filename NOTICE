@@ -1,0 +1,56 @@
+Orbit Wars Kaggle Bot
+======================
+
+This project (Orbit Wars Kaggle Bot, herein "the Software") is licensed
+under the MIT License — see the LICENSE file for full terms.
+
+THIRD-PARTY CREDITS
+-------------------
+
+Portions of this Software are derivative works built on top of publicly
+shared community code from the Kaggle Orbit Wars competition. The original
+authors retain credit for their contributions; modifications, tuning, and
+architectural changes in subsequent versions are by orf527.
+
+Original works incorporated as starting points:
+
+- "Orbit (Star) Wars | LB: MAX 1224"
+  Author:   Roman Tamrazov
+  Source:   https://www.kaggle.com/code/romantamrazov/orbit-star-wars-lb-max-1224
+            (kernel version 6, published publicly on Kaggle)
+  Used as:  Baseline rule-based architecture for v5.x submissions and forward.
+  License:  No explicit license set on the original Kaggle notebook. The
+            third-party distribution at https://github.com/automatylicza/orbit-wars-lab
+            (agents/external/tamrazov-starwars/) characterizes the work as
+            Apache 2.0 / MIT — both OSI-approved. We rely on this third-party
+            distribution's license declaration in good faith.
+  Status:   Substantially modified, retuned, and architecturally extended
+            in v5.0 through v6.71. Original strategic concepts and forward
+            simulation core preserved; constants, decision modes, routing,
+            and 4-player handling are extensively reworked.
+
+THIRD-PARTY REFERENCE MATERIAL (NOT REDISTRIBUTED)
+--------------------------------------------------
+
+The `references/external_agents/` directory (gitignored, not part of this
+distribution) contains additional public agents used purely for local
+benchmarking. Those agents are NOT included in this repository:
+
+- pascal-orbitwork-v14, pilkwang-structured, sigmaborov-reinforce/starter,
+  ykhnkf-distance-prioritized, yuriygreben-architect — all retrieved from
+  https://github.com/automatylicza/orbit-wars-lab (MIT-claimed third-party
+  distribution). Each remains the property of its original author.
+
+ATTRIBUTION IN-CODE
+-------------------
+
+The active `main.py` and the `submissions/v5_*` family include attribution
+headers identifying Tamrazov's notebook as the upstream source. These
+in-code attributions are preserved as part of compliance with the upstream
+authors' implied or claimed license terms.
+
+QUESTIONS / REMOVAL REQUESTS
+----------------------------
+
+If you are an upstream author and would like attribution adjusted, removed,
+or the derivative work taken down, please open an issue on this repository.

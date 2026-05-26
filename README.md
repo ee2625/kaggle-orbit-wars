@@ -1,6 +1,31 @@
 # Orbit Wars Kaggle Bot
 
-Starter repo for the Kaggle Orbit Wars competition.
+A rule-based agent for the [Kaggle Orbit Wars](https://www.kaggle.com/competitions/orbit-wars)
+simulation competition. Iterates on a publicly-shared community baseline with
+substantial reworking of constants, decision modes, routing, and 4-player handling.
+
+## License & Lineage
+
+This project is released under the [MIT License](LICENSE).
+
+From **v5.0 onward**, the agent derives from the publicly-shared Kaggle notebook
+[Orbit (Star) Wars | LB: MAX 1224](https://www.kaggle.com/code/romantamrazov/orbit-star-wars-lb-max-1224)
+by **Roman Tamrazov** (kernel version 6). The original Kaggle notebook does not
+set an explicit license; the third-party distribution at
+[automatylicza/orbit-wars-lab](https://github.com/automatylicza/orbit-wars-lab)
+characterizes it as Apache 2.0 / MIT (both OSI-approved). We rely on that
+distribution's license in good faith.
+
+Subsequent versions (v5.x through v6.71) extensively modify the upstream work:
+constants are retuned for our opponent pool, the 4-player decision path is
+substantially rewritten, routing/aim caching has been overhauled, and a mode
+router was added on top. The forward-simulation core and many strategic
+primitives originate from Tamrazov's work — those concepts retain their
+original credit.
+
+Full attribution detail and third-party references live in [NOTICE](NOTICE).
+In-code attribution headers are preserved in `main.py` and the
+`submissions/v5_*` family.
 
 ## Quick Start
 
@@ -15,7 +40,7 @@ python -m unittest discover -s tests
 python scripts/run_local.py --episodes 3
 python scripts/run_local.py --episodes 3 --opponents random random random
 python scripts/backtest.py --episodes 10 --out-dir backtests
-python scripts/league_backtest.py --agent main.py --agent random --games 20 --out-dir backtests
+python scripts/league_backtest.py --agent main.py --agent random --games 20 --jobs 4 --out-dir backtests
 python scripts/collect_feedback.py --latest-submissions 2 --download-logs
 ```
 
@@ -74,6 +99,9 @@ python scripts/league_backtest.py \
   --out-dir backtests/league
 ```
 
+`--jobs` parallelizes `round-robin` and `random` schedules. It is ignored for
+`ladder`, because ladder matchmaking depends on live rating updates.
+
 For 4-player local games, provide at least four agents:
 
 ```bash
@@ -84,7 +112,19 @@ python scripts/league_backtest.py \
   --agent random \
   --agent random \
   --games 20 \
+  --jobs 4 \
   --out-dir backtests/league_4p
+```
+
+Run a small Optuna sweep over the main strategy constants:
+
+```bash
+python scripts/tune_constants.py \
+  --trials 30 \
+  --games-2p 8 \
+  --games-4p 8 \
+  --jobs 4 \
+  --out-dir backtests/optuna_constants
 ```
 
 Analyze downloaded Kaggle replays to find failure modes:

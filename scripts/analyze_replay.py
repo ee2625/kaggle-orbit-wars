@@ -14,15 +14,26 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from main import (  # noqa: E402
-    BOARD_SIZE,
-    Planet,
-    Fleet,
-    crosses_sun,
-    distance_to_segment,
-    fleet_speed,
-    projected_fleet_target,
-)
+import main as agent_main  # noqa: E402
+
+
+def _agent_symbol(name: str) -> Any:
+    if hasattr(agent_main, name):
+        return getattr(agent_main, name)
+    for ns_name in ("_V671_NS", "_V635_NS", "_V2P_NS", "_V4P_NS"):
+        namespace = getattr(agent_main, ns_name, None)
+        if isinstance(namespace, dict) and name in namespace:
+            return namespace[name]
+    raise ImportError(f"current main.py does not expose {name}")
+
+
+BOARD_SIZE = _agent_symbol("BOARD_SIZE")
+Planet = _agent_symbol("Planet")
+Fleet = _agent_symbol("Fleet")
+crosses_sun = _agent_symbol("crosses_sun")
+distance_to_segment = _agent_symbol("distance_to_segment")
+fleet_speed = _agent_symbol("fleet_speed")
+projected_fleet_target = _agent_symbol("projected_fleet_target")
 
 
 @dataclass
@@ -130,6 +141,42 @@ def team_names(replay: dict[str, Any]) -> list[str]:
     return [f"player{index}" for index in range(len(replay.get("steps", [[]])[0]))]
 
 
+def project_fleet_target_for_obs(
+    fleet: Fleet,
+    planets: list[Planet],
+    obs: dict[str, Any],
+    angular_velocity: float,
+    comet_ids: set[int],
+    max_turns: int,
+) -> Planet | None:
+    """Project a launch target with moving-planet support when the agent exposes it."""
+    namespace = getattr(agent_main, "_V4P_NS", {})
+    dynamic_project = namespace.get("fleet_target_planet_dynamic") if isinstance(namespace, dict) else None
+    if dynamic_project is not None:
+        initial_by_id = {}
+        planet_type = namespace.get("Planet", Planet) if isinstance(namespace, dict) else Planet
+        for row in obs.get("initial_planets", []) or []:
+            try:
+                initial = planet_type(*row)
+            except (TypeError, ValueError):
+                continue
+            initial_by_id[int(initial.id)] = initial
+        target, eta = dynamic_project(
+            fleet,
+            planets,
+            initial_by_id,
+            angular_velocity,
+            obs.get("comets", []) or [],
+            comet_ids,
+            max_turns=max_turns,
+        )
+        if target is not None and (eta is None or eta <= max_turns):
+            return target
+        return None
+
+    return projected_fleet_target(fleet, planets, obs, angular_velocity, comet_ids, max_turns=max_turns)
+
+
 def classify_target_owner(target: Planet, player: int, launch: LaunchStats, comet_ids: set[int]) -> None:
     if target.id in comet_ids:
         launch.comet_targets += 1
@@ -143,7 +190,10 @@ def classify_target_owner(target: Planet, player: int, launch: LaunchStats, come
 
 def update_launch_stats(replay: dict[str, Any], player_count: int, stats: list[PlayerStats], early_turns: int) -> None:
     for turn, states in enumerate(replay["steps"]):
-        obs = world_observation(replay, turn)
+        # Kaggle replay actions are one row ahead of the observation they were
+        # chosen from. Use the previous observation to avoid impossible
+        # "launched more ships than source had" diagnostics.
+        obs = world_observation(replay, turn - 1 if turn > 0 else turn)
         planets = list(planets_by_id(obs).values())
         planet_map = {planet.id: planet for planet in planets}
         angular_velocity = float(obs.get("angular_velocity", 0.0) or 0.0)
@@ -176,7 +226,14 @@ def update_launch_stats(replay: dict[str, Any], player_count: int, stats: list[P
                     source.id,
                     ships,
                 )
-                target = projected_fleet_target(fake_fleet, planets, obs, angular_velocity, comet_ids, max_turns=140)
+                target = project_fleet_target_for_obs(
+                    fake_fleet,
+                    planets,
+                    obs,
+                    angular_velocity,
+                    comet_ids,
+                    max_turns=140,
+                )
                 if target is None:
                     launch.projected_misses += 1
                     if turn <= early_turns and len(launch.early_examples) < 6:
